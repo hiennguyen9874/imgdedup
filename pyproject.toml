@@ -1,0 +1,51 @@
+[project]
+name = "vllm-serving"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "numpy<2",
+    "torch==2.5.1",
+    "torchaudio==2.5.1",
+    "torchvision==0.20.1",
+    "tqdm>=4.67.1",
+    "transformers>=4.45",
+]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux'",
+]
+no-build-isolation = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+onnx-graphsurgeon = { index = "nvidia"}
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.ngc.nvidia.com"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "faiss-cpu>=1.12.0",
+]
