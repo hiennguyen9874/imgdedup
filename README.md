@@ -54,18 +54,10 @@ The tool can operate in two modes:
 
 ## Installation
 
-### CPU Version
-
 ```bash
-pip install numpy pillow tqdm torch transformers faiss-cpu
-```
+uv sync --no-group dev
 
-### GPU Version (Recommended)
-
-```bash
-# For CUDA 12.1
-pip install tqdm "numpy<2" torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
-pip install "transformers>=4.45" faiss-gpu
+MAX_JOBS=$(nproc) uv sync --group dev
 ```
 
 ### Dependencies
