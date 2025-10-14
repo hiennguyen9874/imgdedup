@@ -879,8 +879,8 @@ Suggestions for improvements:
 Default model: `google/siglip2-base-patch16-naflex`
 
 - Architecture: Vision Transformer (ViT)
-- Parameters: ~150M
-- Download size: ~600 MB
+- Parameters: ~375M
+- Download size: ~1.5 GB
 - Feature dimension: 768
 - Input resolution: Flexible (naflex variant)
 - Training: Contrastive learning on image-text pairs
