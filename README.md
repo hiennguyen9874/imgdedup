@@ -23,6 +23,7 @@ A powerful and flexible image duplicate detection and removal tool supporting mu
 `imgdedup` is a Python-based tool designed to scan directories recursively, identify duplicate or near-duplicate images based on semantic similarity, and optionally remove them based on configurable policies. It uses CLIP (SigLIP2) vision transformers for intelligent image comparison.
 
 The tool can operate in two modes:
+
 - **Dry run** (default): Generate a JSON report without deleting files
 - **In-place** (`--inplace`): Delete duplicates immediately after detection
 
@@ -31,21 +32,25 @@ The tool can operate in two modes:
 ## Features
 
 ✅ **Semantic Similarity Detection**
+
 - Deep learning-based detection using CLIP (SigLIP2) vision transformers
 - Detects visually and semantically similar content
 - Robust to transformations (resize, crop, rotation, color adjustments)
 
 ✅ **Flexible Keep Policies**
+
 - Lexicographic (alphabetical path)
 - File size (smallest or largest)
 - Modification time (newest or oldest)
 
 ✅ **Safe by Default**
+
 - Dry run mode prevents accidental deletions
 - Comprehensive JSON reports for review
 - Progress bars for long operations
 
 ✅ **Performance Optimized**
+
 - Multi-GPU support for parallel processing
 - GPU acceleration support for CLIP mode
 - Batch processing for neural network inference
@@ -65,6 +70,7 @@ MAX_JOBS=$(nproc) uv sync --group dev
 ### Dependencies
 
 **Required:**
+
 - `numpy` - Array operations
 - `Pillow` - Image loading and processing
 - `tqdm` - Progress bars
@@ -99,29 +105,60 @@ python main.py <folder> [options]
 
 ### Arguments
 
-| Argument             | Type   | Default                              | Description                                               |
-| -------------------- | ------ | ------------------------------------ | --------------------------------------------------------- |
-| `folder`             | str    | Required                             | Root folder to scan recursively                           |
-| `--threshold`        | float  | 0.985                                | Cosine similarity threshold (0.0-1.0)                     |
-| `--k`                | int    | 10                                   | Top-k neighbors to search                                 |
-| `--batch-size`       | int    | 128                                  | Batch size for inference                                  |
-| `--model`            | str    | `google/siglip2-base-patch16-naflex` | Hugging Face model name                                   |
-| `--gpus`             | int    | all available                        | Number of GPUs to use for parallel processing             |
-| `--gpu-memory-fraction` | float | 0.9                                | GPU memory fraction to use per GPU (0.1-1.0)              |
-| `--keep-policy`      | choice | `lexi`                               | Policy: `lexi`, `smallest`, `largest`, `newest`, `oldest` |
-| `--inplace`          | flag   | False                                | Delete duplicates (otherwise dry run)                     |
-| `--report`           | str    | `<folder>/dedup_report.json`         | Path to output JSON report                                |
+| Argument                | Type   | Default                              | Description                                               |
+| ----------------------- | ------ | ------------------------------------ | --------------------------------------------------------- |
+| `folder`                | str    | Required                             | Root folder to scan recursively                           |
+| `--threshold`           | float  | 0.985                                | Cosine similarity threshold (0.0-1.0)                     |
+| `--k`                   | int    | 10                                   | Top-k neighbors to search                                 |
+| `--batch-size`          | int    | 128                                  | Batch size for inference                                  |
+| `--model`               | str    | `google/siglip2-base-patch16-naflex` | Hugging Face model name                                   |
+| `--gpus`                | int    | all available                        | Number of GPUs to use for parallel processing             |
+| `--gpu-memory-fraction` | float  | 0.9                                  | GPU memory fraction to use per GPU (0.1-1.0)              |
+| `--keep-policy`         | choice | `lexi`                               | Policy: `lexi`, `smallest`, `largest`, `newest`, `oldest` |
+| `--inplace`             | flag   | False                                | Delete duplicates (otherwise dry run)                     |
+| `--report`              | str    | `<folder>/dedup_report.json`         | Path to output JSON report                                |
 
 ---
 
+## Project Structure
+
+```
+imgdedup/
+├── main.py                 # Entry point (13 lines)
+├── dedup/                  # Main package
+│   ├── __init__.py         # Package exports and metadata
+│   ├── cli.py              # Command-line interface and orchestration
+│   ├── hardware.py         # Hardware detection and optimization
+│   ├── filesystem.py       # File system operations and scanning
+│   ├── models.py           # CLIP model operations and feature extraction
+│   ├── similarity.py       # FAISS indexing and clustering algorithms
+│   ├── reporting.py        # Report generation and analysis
+│   └── deletion.py         # Safe file deletion operations
+├── README.md
+├── pyproject.toml
+└── .gitignore
+```
+
 ## Architecture
+
+The tool follows a clean modular architecture with clear separation of concerns:
+
+### Core Modules
+
+- **`dedup/cli.py`**: Command-line interface and main workflow orchestration (225 lines)
+- **`dedup/hardware.py`**: Hardware detection, GPU optimization, and capability testing (156 lines)
+- **`dedup/filesystem.py`**: File scanning, metadata handling, and workload distribution (108 lines)
+- **`dedup/models.py`**: CLIP model operations and multi-GPU feature extraction (476 lines)
+- **`dedup/similarity.py`**: FAISS indexing and Union-Find clustering algorithms (103 lines)
+- **`dedup/reporting.py`**: Report generation and duplicate analysis (54 lines)
+- **`dedup/deletion.py`**: Safe file deletion with error handling and progress tracking (49 lines)
 
 ### High-Level Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Command Line Interface                  │
-│                        (argparse)                           │
+│                        (dedup/cli.py)                       │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -130,6 +167,8 @@ python main.py <folder> [options]
 │  • Recursive directory traversal                            │
 │  • Image file filtering (jpg, png, bmp, webp, tif)          │
 │  • Metadata extraction (size, mtime)                        │
+│  • Workload distribution for multi-GPU                      │
+│                    (dedup/filesystem.py)                    │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -139,6 +178,7 @@ python main.py <folder> [options]
 │  • Check bfloat16 GPU support                               │
 │  • Determine optimal dtype and attention                    │
 │  • Detect available GPUs and memory                         │
+│                     (dedup/hardware.py)                     │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -148,6 +188,7 @@ python main.py <folder> [options]
 │  • Intelligent workload distribution                       │
 │  • Parallel processing with ThreadPoolExecutor             │
 │  • Per-GPU batch size optimization                         │
+│                    (dedup/models.py)                        │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -159,6 +200,7 @@ python main.py <folder> [options]
 │  • Automatic fallback to single GPU/CPU                    │
 │  • Flash Attention 2 / SDPA / Eager per GPU                │
 │  • bfloat16 / float16 / float32 per GPU                    │
+│                    (dedup/models.py)                        │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -167,6 +209,7 @@ python main.py <folder> [options]
 │  • L2 normalization for cosine similarity                   │
 │  • GPU/CPU k-NN search                                      │
 │  • Top-k neighbor retrieval                                 │
+│                   (dedup/similarity.py)                     │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -174,6 +217,7 @@ python main.py <folder> [options]
 │                    Grouping Engine                          │
 │  • Union-Find algorithm for clustering                      │
 │  • Threshold-based duplicate group formation                │
+│                   (dedup/similarity.py)                     │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -181,6 +225,7 @@ python main.py <folder> [options]
 │              Representative Selection                       │
 │  • Apply keep policy to each group                          │
 │  • Mark files for retention/deletion                        │
+│                   (dedup/reporting.py)                      │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -188,6 +233,7 @@ python main.py <folder> [options]
 │                    Report Generation                        │
 │  • JSON output with metadata                                │
 │  • Statistics summary                                       │
+│                   (dedup/reporting.py)                      │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
@@ -195,64 +241,121 @@ python main.py <folder> [options]
 │              Optional File Deletion                         │
 │  • Only if --inplace flag is set                            │
 │  • Error handling and logging                               │
+│                    (dedup/deletion.py)                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Core Components
+### Key Functions by Module
 
-#### 1. **File Scanner (`scan_images`)**
-- **Purpose**: Discovers all image files in the target directory tree
-- **Process**:
-  1. Recursively traverses directory structure
-  2. Filters by supported image extensions
-  3. Extracts file metadata (size, modification time)
-  4. Returns list of `ImgRec` objects
-- **Supported formats**: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`, `.tif`, `.tiff`
+#### **dedup/filesystem.py**
 
-#### 2. **Hardware Detection**
-- **Flash Attention**: Automatically detects if `flash-attn` package is installed
-- **bfloat16 Support**: Checks GPU compute capability (Ampere/8.0+ for optimal support)
-- **Attention Priority**: flash_attention_2 > sdpa > eager
-- **Dtype Priority**: bfloat16 > float16 > float32
+- `scan_images()`: Recursive image scanning with metadata extraction
+- `split_records_for_gpus()`: Intelligent workload distribution across GPUs
+- `get_optimal_batch_size()`: Per-GPU batch size optimization
+- `ImgRec`: Dataclass for file metadata
 
-#### 3. **CLIP Feature Extraction (`extract_clip_features`)**
-- Loads SigLIP2 vision transformer model with optimal settings
-- Automatic fallback: tries flash attention → SDPA → eager
-- Automatic fallback: tries bfloat16 → float16 → float32
-- Batched GPU/CPU inference with progress tracking
-- Returns L2-normalized feature vectors
+#### **dedup/hardware.py**
 
-#### 4. **FAISS Similarity Search (`build_groups_clip`)**
-- L2-normalizes features for cosine similarity
-- Creates GPU or CPU FAISS index (IndexFlatIP)
-- Performs k-NN search for each image
-- Groups images with similarity ≥ threshold
-- O(n·k·log n) complexity
+- `check_flash_attention_available()`: Flash Attention detection
+- `detect_available_gpus()`: GPU capability and memory detection
+- `print_gpu_info()`: Hardware status reporting
+- `get_optimal_dtype_and_attention()`: Automatic hardware optimization
 
-#### 5. **Grouping Engine (Union-Find)**
-- **Data structure**: Disjoint Set Union (DSU) with path compression
-- **Purpose**: Efficiently merge similar images into groups
-- **Optimization**: Path halving during `find()` operations
-- **Output**: List of duplicate groups (indices into original records)
+#### **dedup/models.py**
 
-#### 6. **Representative Selector (`pick_representative`)**
-- **Purpose**: Choose one file to keep from each duplicate group
-- **Policies**:
-  - `lexi`: Alphabetically first path
-  - `smallest`: Smallest file size
-  - `largest`: Largest file size
-  - `newest`: Most recent modification time
-  - `oldest`: Oldest modification time
+- `extract_clip_features()`: Single-GPU CLIP feature extraction
+- `extract_clip_features_multigpu()`: Multi-GPU parallel processing
+- `ImageDataset`: PyTorch dataset for batched image loading
+- Comprehensive error handling and OOM recovery
 
-#### 7. **Report Generator (`make_report`)**
-- Creates structured JSON output
-- Includes metadata: timestamp, counts, policy
-- Lists all groups with keep/delete decisions
+#### **dedup/similarity.py**
 
-#### 8. **Deletion Engine (`delete_duplicates`)**
-- Only executes if `--inplace` flag is set
-- Attempts to remove each duplicate file
-- Collects and reports errors without stopping
+- `build_groups_clip()`: FAISS-based similarity search and clustering
+- `l2_normalize()`: Feature vector normalization
+- `UnionFind`: Efficient clustering data structure
+
+#### **dedup/reporting.py**
+
+- `make_report()`: Duplicate analysis and structured report generation
+- `pick_representative()`: Policy-based file selection logic
+
+#### **dedup/deletion.py**
+
+- `delete_duplicates()`: Safe file deletion with progress tracking
+- Comprehensive error handling and detailed statistics
+
+#### **dedup/cli.py**
+
+- `main()`: Complete workflow orchestration and user interface
+- `parse_args()`: Command-line argument processing
+- `validate_args()`: Input validation and error checking
+
+---
+
+## Development Benefits
+
+### Modular Architecture Advantages
+
+The refactored modular structure provides significant benefits for development and maintenance:
+
+**✅ Clean Separation of Concerns**
+
+- Each module has a single, well-defined responsibility
+- Hardware detection is isolated from file operations
+- Model operations are separated from similarity calculations
+- Clear interfaces between components
+
+**✅ Maintainability**
+
+- Easy to locate and modify specific functionality
+- Reduced risk of introducing bugs when making changes
+- Clear dependency chains between modules
+- Self-documenting code structure
+
+**✅ Testability**
+
+- Individual modules can be unit tested in isolation
+- Mock dependencies easily for focused testing
+- Clear interfaces make testing straightforward
+- Better code coverage potential
+
+**✅ Extensibility**
+
+- New similarity algorithms can be added to `similarity.py`
+- Additional file formats supported in `filesystem.py`
+- New models integrated in `models.py`
+- Custom report formats in `reporting.py`
+
+**✅ Reusability**
+
+- Modules can be imported and used independently
+- Hardware detection utilities useful for other projects
+- CLIP feature extraction reusable for other vision tasks
+- FAISS clustering applicable to other domains
+
+### Code Organization
+
+The refactoring transformed a monolithic 1,148-line file into:
+
+- **9 well-structured files** with clear responsibilities
+- **1,263 total lines** including documentation and imports
+- **22 exported functions** with clean APIs
+- **Full backward compatibility** maintained
+
+### Import Structure
+
+```python
+# Main entry point
+from dedup.cli import main
+
+# Individual modules can be imported as needed
+from dedup.hardware import detect_available_gpus, print_gpu_info
+from dedup.filesystem import scan_images, split_records_for_gpus
+from dedup.models import extract_clip_features_multigpu
+from dedup.similarity import build_groups_clip
+from dedup.reporting import make_report
+from dedup.deletion import delete_duplicates
+```
 
 ---
 
@@ -263,19 +366,23 @@ python main.py <folder> [options]
 **Use Case**: Finding semantically similar images even if visually different (e.g., different photos of same object, similar scenes)
 
 **How it works**:
+
 1. **Multi-GPU detection and setup**:
+
    - Automatically detects all available CUDA GPUs
    - Tests GPU functionality and memory capabilities
    - Selects optimal number of GPUs (or uses all available)
    - Graceful fallback to single GPU/CPU if multi-GPU fails
 
 2. **Workload distribution**:
+
    - Splits image records into balanced chunks across GPUs
    - Optimizes batch size per GPU based on available memory
    - Uses `num_workers=0` to prevent subprocess initialization issues
    - Handles remainder images intelligently
 
 3. **Parallel feature extraction**:
+
    - Independent model loading on each GPU with optimal settings
    - Thread-based parallel processing using ThreadPoolExecutor
    - Per-GPU memory management and OOM recovery
@@ -283,22 +390,25 @@ python main.py <folder> [options]
    - Automatic fallback: flash_attention_2 > sdpa > eager
    - Automatic fallback: bfloat16 > float16 > float32
 
-5. **Index building**:
+4. **Index building**:
+
    - Create FAISS index (GPU or CPU)
    - Add all feature vectors to index
    - Index type: Flat Inner Product (exact search)
 
-6. **Similarity search**:
+5. **Similarity search**:
+
    - For each image, find k nearest neighbors
    - Compute cosine similarity (dot product of normalized vectors)
    - Similarity range: -1 (opposite) to 1 (identical)
 
-7. **Clustering**:
+6. **Clustering**:
    - Use Union-Find to group images
    - Link pairs with similarity ≥ threshold
    - Form transitive closure of similar images
 
 **Strengths**:
+
 - ✅ Understands semantic content (cats, dogs, buildings, etc.)
 - ✅ Robust to extreme transformations (crop, rotate, flip, color)
 - ✅ Can find "similar but not duplicate" images
@@ -310,12 +420,14 @@ python main.py <folder> [options]
 - ✅ Intelligent fallback to single GPU/CPU if multi-GPU fails
 
 **Limitations**:
+
 - ❌ Requires large dependencies (torch, transformers, faiss)
 - ❌ First run downloads ~1GB model
 - ❌ High memory usage (stores all features in RAM)
 - ❌ May group conceptually similar but distinct images
 
 **Parameters**:
+
 - `--threshold`: Cosine similarity (0.0-1.0)
   - `0.99`: Very strict (near-identical images)
   - `0.985`: Default (good balance)
@@ -329,6 +441,7 @@ python main.py <folder> [options]
 **Complexity**: O(n·k·log n) time with FAISS, O(n·d) space (d=embedding dimension)
 
 **Performance Enhancements**:
+
 - **Multi-GPU Processing**: Near-linear speedup with number of GPUs
 - **Flash Attention 2**: Up to 2-4x faster inference per GPU, lower memory usage
 - **bfloat16**: Up to 2x faster on Ampere GPUs (A100, RTX 30xx/40xx)
@@ -336,6 +449,7 @@ python main.py <folder> [options]
 - **Per-GPU Batch Optimization**: Automatic batch size adjustment based on GPU memory
 
 **Example**:
+
 ```bash
 # Default settings (balanced, auto-optimized, uses all available GPUs)
 python main.py /data/photos
@@ -369,6 +483,7 @@ Determines which file to keep when duplicates are found:
 ### Threshold Tuning
 
 **Cosine Similarity Threshold**:
+
 ```bash
 # Conservative (fewer false positives)
 --threshold 0.99-1.0   # Near-identical content
@@ -383,6 +498,7 @@ Determines which file to keep when duplicates are found:
 ### Optimization Options
 
 **Flash Attention** (Optional, for faster inference):
+
 ```bash
 # Install flash attention for 2-4x speedup
 pip install -U flash-attn --no-build-isolation
@@ -392,6 +508,7 @@ python main.py /data/photos
 ```
 
 **GPU Selection** (for multi-GPU systems):
+
 ```bash
 # Use specific GPU
 CUDA_VISIBLE_DEVICES=0 python main.py /data/photos
@@ -423,9 +540,7 @@ CUDA_VISIBLE_DEVICES=1 python main.py /data/photos2
     },
     {
       "keep": "/data/photos/vacation/beach.png",
-      "duplicates": [
-        "/data/photos/vacation/beach_resized.jpg"
-      ]
+      "duplicates": ["/data/photos/vacation/beach_resized.jpg"]
     }
   ]
 }
@@ -448,33 +563,37 @@ CUDA_VISIBLE_DEVICES=1 python main.py /data/photos2
 
 ### Hardware Configurations
 
-| Configuration                                               | Speed | Memory | Best For                     |
-| ----------------------------------------------------------- | ----- | ------ | ---------------------------- |
-| **4x Ampere GPUs + Flash Attn + bfloat16 + Multi-GPU**     | ⚡⚡⚡⚡⚡ | Low    | Very large datasets (>50k images) |
-| **2x Ampere GPUs + Flash Attn + bfloat16 + Multi-GPU**     | ⚡⚡⚡⚡  | Low    | Large datasets (>10k images) |
-| **Single Ampere GPU + Flash Attn + bfloat16**              | ⚡⚡⚡   | Low    | Medium datasets (1k-10k images) |
-| **GPU + float16**                                          | ⚡⚡    | Medium | Small datasets (<1k images)  |
-| **CPU + float32**                                          | ⚡     | Low    | Tiny datasets (<100 images)  |
+| Configuration                                          | Speed      | Memory | Best For                          |
+| ------------------------------------------------------ | ---------- | ------ | --------------------------------- |
+| **4x Ampere GPUs + Flash Attn + bfloat16 + Multi-GPU** | ⚡⚡⚡⚡⚡ | Low    | Very large datasets (>50k images) |
+| **2x Ampere GPUs + Flash Attn + bfloat16 + Multi-GPU** | ⚡⚡⚡⚡   | Low    | Large datasets (>10k images)      |
+| **Single Ampere GPU + Flash Attn + bfloat16**          | ⚡⚡⚡     | Low    | Medium datasets (1k-10k images)   |
+| **GPU + float16**                                      | ⚡⚡       | Medium | Small datasets (<1k images)       |
+| **CPU + float32**                                      | ⚡         | Low    | Tiny datasets (<100 images)       |
 
 ### Scaling Characteristics
 
 **Multi-GPU with Flash Attention (2x-4x A100, RTX 40xx)**:
+
 - 1,000 images: ~15-30 seconds
 - 10,000 images: ~2.5-5 minutes
 - 100,000 images: ~15-30 minutes
 - 1,000,000 images: ~2.5-3 hours
 
 **Single GPU with Flash Attention (A100, RTX 40xx)**:
+
 - 1,000 images: ~30-60 seconds
 - 10,000 images: ~5-10 minutes
 - 100,000 images: ~45-90 minutes
 
 **GPU without Flash Attention (older GPUs)**:
+
 - 1,000 images: ~1-2 minutes
 - 10,000 images: ~10-20 minutes
 - 100,000 images: ~1.5-3 hours
 
 **CPU Mode**:
+
 - 1,000 images: ~5-15 minutes
 - 10,000 images: ~1-3 hours
 - 100,000 images: ~10-20 hours
@@ -482,37 +601,44 @@ CUDA_VISIBLE_DEVICES=1 python main.py /data/photos2
 ### Optimization Tips
 
 1. **Multi-GPU Setup** (for maximum performance):
+
    - Use `--gpus` to specify number of GPUs (default: all available)
    - Adjust `--gpu-memory-fraction` if encountering OOM errors (try 0.7-0.8)
    - Ensure all GPUs have similar memory for balanced processing
    - Multi-GPU provides near-linear speedup for large datasets
 
 2. **Install Flash Attention** (highly recommended for GPU):
+
    ```bash
    pip install -U flash-attn --no-build-isolation
    ```
+
    - 2-4x faster inference per GPU
    - Lower memory usage
    - Automatic detection and fallback
 
 3. **Use Ampere or newer GPUs** for best performance:
+
    - A100, A6000, RTX 30xx/40xx series
    - Native bfloat16 support
    - Better flash attention performance
    - Automatic per-GPU optimization
 
 4. **Optimize batch size**:
+
    - Base `--batch-size` is auto-adjusted per GPU
    - Increase if GPU memory allows (try 256 or 512)
    - Reduce to 32 or 64 if you encounter OOM errors
    - Tool automatically optimizes per GPU based on available memory
 
 5. **Adjust k-neighbors** for speed:
+
    - Decrease `--k` for faster search (try 5 for very large datasets)
    - Increase `--k` for more thorough duplicate detection
    - Default 10 is a good balance
 
 6. **Large datasets** (>100k images):
+
    - Multi-GPU is highly recommended for best performance
    - Process in subdirectories if possible
    - Use higher thresholds (0.99) to reduce groups
@@ -625,6 +751,7 @@ python main.py ~/art_collection \
 ### Best Practices
 
 ✅ **DO**:
+
 - Always run without `--inplace` first (dry run)
 - Review the JSON report before deleting
 - Back up important files before using `--inplace`
@@ -633,6 +760,7 @@ python main.py ~/art_collection \
 - Install flash-attn for optimal performance
 
 ❌ **DON'T**:
+
 - Use `--inplace` on the first run without reviewing
 - Use very low thresholds (<0.90) without careful review
 - Run on directories without backups
@@ -645,39 +773,50 @@ python main.py ~/art_collection \
 ### Common Issues
 
 **Issue**: `ImportError: cannot import name 'faiss'`
+
 - **Solution**: Install FAISS with `pip install faiss-cpu` (or `faiss-gpu` for GPU support)
 
 **Issue**: `CUDA out of memory` error
+
 - **Solution**: Reduce `--batch-size` to 32 or 64, or use CPU mode
 
 **Issue**: Too many false positives
+
 - **Solution**: Increase `--threshold` to 0.99 or higher for stricter matching
 
 **Issue**: Missing obvious duplicates
+
 - **Solution**: Decrease `--threshold` to 0.95-0.97, or increase `--k` to 20
 
 **Issue**: Slow performance on GPU
-- **Solution**: 
+
+- **Solution**:
   1. Install flash attention: `pip install -U flash-attn --no-build-isolation`
   2. Increase batch size if you have memory
   3. Check that GPU is actually being used (tool will print "Using device: cuda")
 
 **Issue**: Model download fails
+
 - **Solution**: Check internet connection, or manually download model and specify local path
 
 **Issue**: Flash attention import error
+
 - **Solution**: This is normal if not installed. Tool will fallback to SDPA or eager attention automatically
 
 **Issue**: "bfloat16 not supported" warnings
+
 - **Solution**: Normal for older GPUs. Tool automatically falls back to float16
 
 **Issue**: Multi-GPU processing fails
+
 - **Solution**: Check if all GPUs are working and have sufficient memory. Try reducing `--gpus` or `--gpu-memory-fraction`
 
 **Issue**: "CUDA out of memory" on multi-GPU
+
 - **Solution**: Reduce `--gpu-memory-fraction` to 0.7 or lower, or use fewer GPUs with `--gpus`
 
 **Issue**: Uneven GPU utilization
+
 - **Solution**: Normal if dataset size isn't perfectly divisible by number of GPUs. Tool distributes as evenly as possible
 
 ---
@@ -689,6 +828,7 @@ This tool is provided as-is for duplicate image detection and removal.
 ## Contributing
 
 Suggestions for improvements:
+
 - Support for video duplicate detection
 - Add interactive mode for manual review
 - Multi-GPU support for parallel processing
@@ -701,6 +841,7 @@ Suggestions for improvements:
 ## Technical Details
 
 ### Supported Image Formats
+
 - JPEG (`.jpg`, `.jpeg`)
 - PNG (`.png`)
 - BMP (`.bmp`)
@@ -710,11 +851,13 @@ Suggestions for improvements:
 ### System Requirements
 
 **Minimum**:
+
 - Python 3.8+
 - 8 GB RAM
 - Any CPU (slow but works)
 
 **Recommended**:
+
 - Python 3.9+
 - 16 GB RAM
 - NVIDIA GPU with 8+ GB VRAM (RTX 30xx/40xx or better)
@@ -722,6 +865,7 @@ Suggestions for improvements:
 - Flash Attention 2 installed
 
 **Optimal** (for large datasets):
+
 - Python 3.10+
 - 32 GB RAM
 - Multiple NVIDIA Ampere or newer GPUs (A100, RTX 40xx)
@@ -733,6 +877,7 @@ Suggestions for improvements:
 ### Model Information
 
 Default model: `google/siglip2-base-patch16-naflex`
+
 - Architecture: Vision Transformer (ViT)
 - Parameters: ~150M
 - Download size: ~600 MB
@@ -741,6 +886,7 @@ Default model: `google/siglip2-base-patch16-naflex`
 - Training: Contrastive learning on image-text pairs
 
 **Performance Optimizations**:
+
 - **Flash Attention 2**: Memory-efficient attention with 2-4x speedup
 - **bfloat16**: Native support on Ampere GPUs for 2x faster inference
 - **SDPA**: PyTorch 2.0+ optimized attention (automatic fallback)
@@ -749,7 +895,20 @@ Default model: `google/siglip2-base-patch16-naflex`
 
 ## Changelog
 
-### Version 2.1 (Current)
+### Version 2.2 (Current) - **Modular Architecture Refactoring**
+
+- **Complete code restructuring** from monolithic 1,148-line file to clean modular architecture
+- **9 separate modules** with clear separation of concerns and single responsibilities
+- **22 exported functions** with clean, well-documented APIs
+- **Improved maintainability** through modular design and clear interfaces
+- **Enhanced testability** with isolated modules that can be unit tested independently
+- **Better extensibility** for adding new algorithms, models, and features
+- **Full backward compatibility** maintained - all existing functionality preserved
+- **Clean dependency management** between modules
+- **Comprehensive documentation** of module responsibilities and functions
+
+### Version 2.1 (Previous)
+
 - **Multi-GPU support** for parallel processing across multiple GPUs
 - **Automatic GPU detection** and workload distribution
 - **Per-GPU batch size optimization** based on available memory
@@ -759,6 +918,7 @@ Default model: `google/siglip2-base-patch16-naflex`
 - Enhanced error handling and recovery per GPU
 
 ### Version 2.0 (Previous)
+
 - **CLIP-only implementation** with SigLIP2 model
 - **Flash Attention 2 support** for 2-4x faster inference
 - **Automatic bfloat16 detection** for Ampere GPUs
@@ -768,9 +928,8 @@ Default model: `google/siglip2-base-patch16-naflex`
 - Improved error handling and user feedback
 
 ### Version 1.0 (Legacy)
+
 - Initial release with three detection algorithms (exact, pHash, CLIP)
 - Union-Find based clustering
 - JSON reporting
 - Multiple keep policies
-
-
