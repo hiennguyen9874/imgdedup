@@ -1,10 +1,11 @@
 [project]
-name = "vllm-serving"
+name = "imgdedup"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
+    "matplotlib>=3.10.7",
     "numpy<2",
     "setuptools>=80.9.0",
     "torch==2.5.1",
@@ -50,4 +51,6 @@ explicit = true
 dev = [
     "faiss-cpu>=1.12.0",
     "flash-attn>=2.8.3",
+    "ipykernel>=7.0.1",
+    "ipython>=8.37.0",
 ]
