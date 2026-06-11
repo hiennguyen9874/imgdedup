@@ -6,10 +6,13 @@ import argparse
 import json
 import os
 import sys
+
+import numpy as np
 from tqdm import tqdm
 
 from .hardware import print_gpu_info
 
+from .cache import DedupCache, build_feature_matrix
 from .filesystem import scan_images
 from .hashing import compute_image_metadata, compute_sha256
 from .matching import MatchThresholds, find_duplicate_pairs
@@ -99,9 +102,9 @@ def parse_args():
     parser.add_argument(
         "--keep-policy",
         type=str,
-        choices=["lexi", "smallest", "largest", "newest", "oldest"],
-        default="lexi",
-        help="Policy for selecting which file to keep. Default: lexi",
+        choices=["lexi", "smallest", "largest", "highest-resolution", "newest", "oldest"],
+        default="highest-resolution",
+        help="Policy for selecting which file to keep. Default: highest-resolution",
     )
 
     parser.add_argument(
@@ -209,37 +212,77 @@ def main():
 
     print(f"Found {len(records)} images\n")
 
-    # Step 2: Compute exact and perceptual hashes
-    print("[2/6] Computing sha256 and pHash...")
-    for record in tqdm(records, desc="Hashing images"):
-        try:
-            record.sha256 = compute_sha256(record.path)
-        except OSError as e:
-            print(f"Warning: Could not compute sha256 for {record.path}: {e}")
+    cache = DedupCache(args.folder)
 
-        try:
-            record.phash, record.width, record.height = compute_image_metadata(record.path)
-        except ImportError as e:
-            print(f"Error: {e}")
-            sys.exit(1)
+    # Step 2: Compute exact and perceptual hashes
+    cached_metadata = cache.apply_cached_metadata(records)
+    print(f"[2/6] Computing sha256 and pHash... ({cached_metadata} metadata cache hits)")
+    for record in tqdm(records, desc="Hashing images"):
+        metadata_cached = (
+            record.sha256 is not None
+            and record.phash is not None
+            and record.width is not None
+            and record.height is not None
+        )
+        if record.sha256 is None:
+            try:
+                record.sha256 = compute_sha256(record.path)
+            except OSError as e:
+                print(f"Warning: Could not compute sha256 for {record.path}: {e}")
+
+        if record.phash is None or record.width is None or record.height is None:
+            try:
+                record.phash, record.width, record.height = compute_image_metadata(record.path)
+            except ImportError as e:
+                print(f"Error: {e}")
+                cache.close()
+                sys.exit(1)
+
+        if not metadata_cached:
+            cache.update_metadata(record)
+    cache.conn.commit()
 
     print()
 
     # Step 3: Extract features
-    print("[3/6] Extracting CLIP features...")
-    features, valid_indices = extract_clip_features_multigpu(
+    missing_embedding_indices = [
+        idx for idx, record in enumerate(records) if cache.get_embedding(record, args.model) is None
+    ]
+    print(
+        f"[3/6] Extracting CLIP features... ({len(records) - len(missing_embedding_indices)} embedding cache hits)"
+    )
+    if missing_embedding_indices:
+        records_to_extract = [records[idx] for idx in missing_embedding_indices]
+        extracted_features, extracted_indices = extract_clip_features_multigpu(
+            records_to_extract,
+            model_name=args.model,
+            batch_size=args.batch_size,
+            num_gpus=args.gpus,
+            gpu_memory_fraction=args.gpu_memory_fraction,
+        )
+        extracted_indices = [missing_embedding_indices[idx] for idx in extracted_indices]
+    else:
+        extracted_features = None
+        extracted_indices = []
+
+    if extracted_features is None:
+        extracted_features = np.empty((0, 0), dtype=np.float32)
+
+    features, valid_indices, embedding_cache_hits = build_feature_matrix(
+        cache,
         records,
-        model_name=args.model,
-        batch_size=args.batch_size,
-        num_gpus=args.gpus,
-        gpu_memory_fraction=args.gpu_memory_fraction,
+        args.model,
+        extracted_features,
+        extracted_indices,
     )
 
     if len(valid_indices) == 0:
         print("No valid images to process. Exiting.")
+        cache.close()
         sys.exit(0)
 
-    print(f"Extracted features: {features.shape}\n")
+    cache.save_embeddings(records, features, valid_indices, args.model)
+    print(f"Extracted/reused features: {features.shape} ({embedding_cache_hits} reused from cache)\n")
 
     # Step 4: Build duplicate groups
     print("[4/6] Building duplicate groups with sha256, pHash, and FAISS...")
@@ -251,7 +294,12 @@ def main():
         phash_verify_distance=args.phash_verify_distance,
     )
     duplicate_pairs, review_pairs, groups = find_duplicate_pairs(
-        records, features, valid_indices, thresholds=thresholds, k=args.k
+        records,
+        features,
+        valid_indices,
+        thresholds=thresholds,
+        k=args.k,
+        faiss_index_path=str(cache.faiss_index_path),
     )
 
     print(f"Found {len(groups)} duplicate groups")
@@ -317,6 +365,7 @@ def main():
         print("\nDry run complete. No files deleted.")
         print(f"To move duplicates to trash, run again with --inplace flag")
 
+    cache.close()
     print("\nDone.")
 
 

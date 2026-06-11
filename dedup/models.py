@@ -4,11 +4,11 @@ CLIP model loading and feature extraction with multi-GPU support.
 
 import threading
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModel, AutoProcessor
 from tqdm import tqdm
@@ -25,11 +25,25 @@ from .filesystem import ImgRec, get_optimal_batch_size
 _model_loading_lock = threading.Lock()
 
 
+def load_image_for_embedding(path: str) -> Image.Image:
+    """Load an image with the same orientation/color policy used by hashing."""
+    with Image.open(path) as image:
+        image = ImageOps.exif_transpose(image)
+        if image.mode in ("RGBA", "LA") or (
+            image.mode == "P" and "transparency" in image.info
+        ):
+            rgba = image.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            image = Image.alpha_composite(background, rgba)
+        return image.convert("RGB")
+
+
 class ImageDataset(Dataset):
     """Dataset wrapper for batch image loading"""
 
-    def __init__(self, records: List[ImgRec]):
+    def __init__(self, records: List[ImgRec], record_indices: Optional[List[int]] = None):
         self.records = records
+        self.record_indices = record_indices or list(range(len(records)))
 
     def __len__(self):
         return len(self.records)
@@ -37,8 +51,8 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         rec = self.records[idx]
         try:
-            img = Image.open(rec.path).convert("RGB")
-            return img, idx
+            img = load_image_for_embedding(rec.path)
+            return img, self.record_indices[idx]
         except (UnidentifiedImageError, OSError) as e:
             print(f"Warning: Could not load {rec.path}: {e}")
             return None
@@ -151,6 +165,7 @@ def extract_features_on_gpu(
     model_name: str = "google/siglip2-base-patch16-naflex",
     batch_size: int = 128,
     gpu_memory_fraction: float = 0.9,
+    record_indices: Optional[List[int]] = None,
 ) -> Tuple[np.ndarray, List[int]]:
     """
     Extract CLIP features on a specific GPU.
@@ -264,7 +279,7 @@ def extract_features_on_gpu(
     if model is None:
         raise RuntimeError(f"GPU {gpu_id}: Failed to load model with any strategy")
 
-    dataset = ImageDataset(records)
+    dataset = ImageDataset(records, record_indices)
     dataloader = DataLoader(
         dataset,
         batch_size=optimal_batch_size,
@@ -391,24 +406,33 @@ def extract_clip_features_multigpu(
     if num_gpus_to_use <= 1:
         print(f"Using single GPU {available_gpus[0]}")
         return extract_features_on_gpu(
-            records, available_gpus[0], model_name, batch_size, gpu_memory_fraction
+            records,
+            available_gpus[0],
+            model_name,
+            batch_size,
+            gpu_memory_fraction,
+            list(range(len(records))),
         )
 
     print(
         f"Using {num_gpus_to_use} GPUs for parallel processing: {available_gpus[:num_gpus_to_use]}"
     )
 
-    # Split records across GPUs
-    gpu_chunks = split_records_for_gpus(records, num_gpus_to_use)
+    # Split records across GPUs while preserving global record indices.
+    indexed_records = list(enumerate(records))
+    indexed_chunks = split_records_for_gpus(indexed_records, num_gpus_to_use)
+    gpu_chunks = [([record for _, record in chunk], [idx for idx, _ in chunk]) for chunk in indexed_chunks]
     gpu_ids_to_use = available_gpus[:num_gpus_to_use]
 
     # Use ThreadPoolExecutor for parallel processing
+    worker_count = min(num_gpus_to_use, len(gpu_chunks))
     all_features = []
     all_indices = []
     completed_gpus = set()
 
     def process_gpu_chunk(gpu_idx_chunk):
-        gpu_idx, chunk = gpu_idx_chunk
+        gpu_idx, chunk_data = gpu_idx_chunk
+        chunk, record_indices = chunk_data
         try:
             if not chunk:
                 print(f"GPU {gpu_idx}: No images to process")
@@ -420,6 +444,7 @@ def extract_clip_features_multigpu(
                 model_name,
                 batch_size,
                 gpu_memory_fraction,
+                record_indices,
             )
             return gpu_idx, features, indices, None
         except Exception as e:
@@ -451,7 +476,7 @@ def extract_clip_features_multigpu(
             return gpu_idx, np.empty((0, 0), dtype=np.float32), [], error_msg
 
     # Process chunks in parallel
-    with ThreadPoolExecutor(max_workers=num_gpus_to_use) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         # Submit all GPU tasks
         future_to_gpu = {
             executor.submit(process_gpu_chunk, (gpu_id, chunk)): gpu_id
@@ -459,7 +484,7 @@ def extract_clip_features_multigpu(
         }
 
         # Create progress bar for overall progress
-        pbar = tqdm(total=num_gpus_to_use, desc="Multi-GPU processing")
+        pbar = tqdm(total=worker_count, desc="Multi-GPU processing")
 
         # Collect results as they complete
         for future in as_completed(future_to_gpu):

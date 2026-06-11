@@ -2,8 +2,9 @@
 Duplicate pair generation and decision policy.
 """
 
+import os
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -41,6 +42,7 @@ class DuplicatePair:
     same_sha256: bool
     decision: str
     reason: str
+    confidence: str
 
 
 def decide_pair(
@@ -48,16 +50,16 @@ def decide_pair(
     phash_dist: Optional[int],
     cosine: Optional[float],
     thresholds: MatchThresholds,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """Apply the requested duplicate policy to one image pair."""
     if same_sha256:
-        return "duplicate", "same_sha256"
+        return "duplicate", "same_sha256", "exact"
 
     if phash_dist is not None and phash_dist <= thresholds.phash_auto_distance:
-        return "duplicate", f"phash_distance<={thresholds.phash_auto_distance}"
+        return "duplicate", f"phash_distance<={thresholds.phash_auto_distance}", "high"
 
     if cosine is not None and cosine >= thresholds.cosine_auto:
-        return "duplicate", f"cosine>={thresholds.cosine_auto:.2f}"
+        return "duplicate", f"cosine>={thresholds.cosine_auto:.2f}", "high"
 
     if (
         cosine is not None
@@ -68,15 +70,16 @@ def decide_pair(
         return (
             "duplicate",
             f"cosine>={thresholds.cosine_verify:.2f}_and_phash<={thresholds.phash_verify_distance}",
+            "verified",
         )
 
     if (
         cosine is not None
         and thresholds.cosine_review <= cosine < thresholds.cosine_verify
     ):
-        return "review", f"{thresholds.cosine_review:.2f}<=cosine<{thresholds.cosine_verify:.2f}"
+        return "review", f"{thresholds.cosine_review:.2f}<=cosine<{thresholds.cosine_verify:.2f}", "review"
 
-    return "ignore", "not_confident"
+    return "ignore", "not_confident", "ignored"
 
 
 def _make_pair(
@@ -93,7 +96,7 @@ def _make_pair(
     right = records[b]
     same_sha = bool(left.sha256 and right.sha256 and left.sha256 == right.sha256)
     phash_dist = phash_distance(left.phash, right.phash)
-    decision, reason = decide_pair(same_sha, phash_dist, cosine, thresholds)
+    decision, reason, confidence = decide_pair(same_sha, phash_dist, cosine, thresholds)
 
     return DuplicatePair(
         a=a,
@@ -103,6 +106,7 @@ def _make_pair(
         same_sha256=same_sha,
         decision=decision,
         reason=reason,
+        confidence=confidence,
     )
 
 
@@ -139,12 +143,28 @@ def _iter_exact_sha_pairs(records: List[ImgRec]) -> Iterable[Tuple[int, int]]:
 
 
 def _iter_phash_pairs(records: List[ImgRec], max_distance: int) -> Iterable[Tuple[int, int]]:
-    hashed = [(idx, record.phash) for idx, record in enumerate(records) if record.phash]
-    for pos, (left_idx, left_hash) in enumerate(hashed):
-        for right_idx, right_hash in hashed[pos + 1 :]:
-            distance = phash_distance(left_hash, right_hash)
-            if distance is not None and distance <= max_distance:
-                yield left_idx, right_idx
+    """Yield pHash-near candidates using 4-bit band buckets instead of all pairs."""
+    buckets: Dict[Tuple[int, str], List[Tuple[int, str]]] = {}
+    for idx, record in enumerate(records):
+        if not record.phash:
+            continue
+        normalized = record.phash.lower()
+        for pos, char in enumerate(normalized):
+            buckets.setdefault((pos, char), []).append((idx, normalized))
+
+    seen: Set[Tuple[int, int]] = set()
+    for bucket in buckets.values():
+        if len(bucket) < 2:
+            continue
+        for pos, (left_idx, left_hash) in enumerate(bucket):
+            for right_idx, right_hash in bucket[pos + 1 :]:
+                key = (left_idx, right_idx) if left_idx < right_idx else (right_idx, left_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+                distance = phash_distance(left_hash, right_hash)
+                if distance is not None and distance <= max_distance:
+                    yield key
 
 
 def _build_faiss_index(feats: np.ndarray):
@@ -164,6 +184,7 @@ def find_duplicate_pairs(
     valid_indices: List[int],
     thresholds: MatchThresholds,
     k: int = 50,
+    faiss_index_path: Optional[str] = None,
 ) -> Tuple[List[DuplicatePair], List[DuplicatePair], List[List[int]]]:
     """
     Find duplicate and review-only pairs, then group duplicates.
@@ -193,6 +214,13 @@ def find_duplicate_pairs(
 
         index = _build_faiss_index(feats)
         index.add(feats)
+        if faiss_index_path:
+            os.makedirs(os.path.dirname(os.path.abspath(faiss_index_path)), exist_ok=True)
+            try:
+                index_to_write = faiss.index_gpu_to_cpu(index)
+            except Exception:
+                index_to_write = index
+            faiss.write_index(index_to_write, faiss_index_path)
 
         k_eff = min(k, len(valid_indices))
         print(f"Searching top-{k_eff} neighbors...")

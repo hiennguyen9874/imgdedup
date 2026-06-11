@@ -9,6 +9,12 @@ from .filesystem import ImgRec
 from .matching import DuplicatePair
 
 
+def _pixel_count(record: ImgRec) -> int:
+    if record.width is None or record.height is None:
+        return 0
+    return record.width * record.height
+
+
 def pick_representative(group: List[int], records: List[ImgRec], policy: str) -> int:
     """
     Select which file to keep from a duplicate group based on policy.
@@ -20,6 +26,8 @@ def pick_representative(group: List[int], records: List[ImgRec], policy: str) ->
         return min(group, key=lambda i: records[i].size)
     elif policy == "largest":
         return max(group, key=lambda i: records[i].size)
+    elif policy == "highest-resolution":
+        return max(group, key=lambda i: (_pixel_count(records[i]), records[i].size))
     elif policy == "newest":
         return max(group, key=lambda i: records[i].mtime)
     elif policy == "oldest":
@@ -62,6 +70,7 @@ def _pair_to_report(pair: DuplicatePair, records: List[ImgRec]) -> Dict:
         "same_sha256": pair.same_sha256,
         "decision": pair.decision,
         "reason": pair.reason,
+        "confidence": pair.confidence,
     }
 
 
@@ -96,6 +105,7 @@ def make_report(
                     "cosine": pair.cosine if pair else None,
                     "phash_distance": pair.phash_distance if pair else None,
                     "same_sha256": pair.same_sha256 if pair else False,
+                    "confidence": pair.confidence if pair else "grouped",
                 }
             )
 

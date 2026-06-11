@@ -28,9 +28,15 @@ from .filesystem import (
 from .models import (
     ImageDataset,
     collate_fn,
+    load_image_for_embedding,
     extract_clip_features,
     extract_features_on_gpu,
     extract_clip_features_multigpu,
+)
+
+from .cache import (
+    DedupCache,
+    build_feature_matrix,
 )
 
 from .similarity import (
@@ -77,6 +83,9 @@ __all__ = [
     # Model operations
     "ImageDataset",
     "collate_fn",
+    "load_image_for_embedding",
+    "DedupCache",
+    "build_feature_matrix",
     "extract_clip_features",
     "extract_features_on_gpu",
     "extract_clip_features_multigpu",
