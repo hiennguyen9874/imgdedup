@@ -81,7 +81,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="google/siglip2-base-patch16-naflex",
+        default="facebook/dinov3-vitb16-pretrain-lvd1689m",
         help="Hugging Face model name. Default: google/siglip2-base-patch16-naflex",
     )
 
