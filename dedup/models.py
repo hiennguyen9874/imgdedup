@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps, UnidentifiedImageError
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoModel, AutoProcessor
+from transformers import AutoImageProcessor, AutoModel, AutoProcessor
 from tqdm import tqdm
 
 from .hardware import (
@@ -67,6 +67,29 @@ def collate_fn(batch):
     return list(imgs), list(indices)
 
 
+def load_image_processor(model_name: str):
+    """Load an image processor for CLIP/SigLIP and vision-only models."""
+    try:
+        return AutoProcessor.from_pretrained(model_name)
+    except Exception:
+        return AutoImageProcessor.from_pretrained(model_name)
+
+
+def get_image_embedding(model, inputs):
+    """Return image embeddings from CLIP-like or vision-only transformer outputs."""
+    if hasattr(model, "get_image_features"):
+        return model.get_image_features(**inputs)
+
+    outputs = model(**inputs)
+    if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+        return outputs.pooler_output
+
+    raise RuntimeError(
+        "Model output does not provide image features or pooler_output; "
+        "try a vision embedding model such as facebook/dinov3-vitb16-pretrain-lvd1689m."
+    )
+
+
 def extract_clip_features(
     records: List[ImgRec],
     model_name: str = "google/siglip2-base-patch16-naflex",
@@ -115,7 +138,7 @@ def extract_clip_features(
                 AutoModel.from_pretrained(model_name, **load_kwargs).to(device).eval()
             )
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = load_image_processor(model_name)
 
     dataset = ImageDataset(records)
     dataloader = DataLoader(
@@ -145,7 +168,7 @@ def extract_clip_features(
                 dtype=autocast_dtype,
                 enabled=(device.type == "cuda"),
             ):
-                features = model.get_image_features(**inputs)
+                features = get_image_embedding(model, inputs)
 
             features = features.float().cpu().numpy()
             all_features.append(features)
@@ -243,7 +266,7 @@ def extract_features_on_gpu(
                 model = model.to(device).eval()
 
                 # Load processor (can be done after model loading)
-                processor = AutoProcessor.from_pretrained(model_name)
+                processor = load_image_processor(model_name)
 
                 print(
                     f"GPU {gpu_id}: Successfully loaded model with {strategy['name']}"
@@ -318,7 +341,7 @@ def extract_features_on_gpu(
                     dtype=autocast_dtype,
                     enabled=(device.type == "cuda"),
                 ):
-                    features = model.get_image_features(**inputs)
+                    features = get_image_embedding(model, inputs)
 
                 features = features.float().cpu().numpy()
                 all_features.append(features)
@@ -348,7 +371,7 @@ def extract_features_on_gpu(
                                 dtype=autocast_dtype,
                                 enabled=(device.type == "cuda"),
                             ):
-                                features = model.get_image_features(**inputs)
+                                features = get_image_embedding(model, inputs)
 
                             features = features.float().cpu().numpy()
                             all_features.append(features)
