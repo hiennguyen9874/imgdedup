@@ -36,7 +36,19 @@ from .models import (
 from .similarity import (
     l2_normalize,
     UnionFind,
-    build_groups_clip,
+)
+
+from .hashing import (
+    compute_sha256,
+    compute_image_metadata,
+    phash_distance,
+)
+
+from .matching import (
+    MatchThresholds,
+    DuplicatePair,
+    decide_pair,
+    find_duplicate_pairs,
 )
 
 from .reporting import (
@@ -71,7 +83,14 @@ __all__ = [
     # Similarity and clustering
     "l2_normalize",
     "UnionFind",
-    "build_groups_clip",
+    # Hashing and matching
+    "compute_sha256",
+    "compute_image_metadata",
+    "phash_distance",
+    "MatchThresholds",
+    "DuplicatePair",
+    "decide_pair",
+    "find_duplicate_pairs",
     # Reporting
     "pick_representative",
     "make_report",

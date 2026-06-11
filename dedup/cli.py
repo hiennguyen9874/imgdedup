@@ -6,12 +6,14 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from tqdm import tqdm
 
 from .hardware import print_gpu_info
+
 from .filesystem import scan_images
+from .hashing import compute_image_metadata, compute_sha256
+from .matching import MatchThresholds, find_duplicate_pairs
 from .models import extract_clip_features_multigpu
-from .similarity import build_groups_clip
 from .reporting import make_report
 from .deletion import delete_duplicates
 
@@ -28,14 +30,42 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--threshold",
+        "--cosine-auto",
         type=float,
-        default=0.985,
-        help="Cosine similarity threshold (0.0-1.0). Default: 0.985",
+        default=0.97,
+        help="Auto-duplicate cosine threshold. Default: 0.97",
     )
 
     parser.add_argument(
-        "--k", type=int, default=10, help="Top-k neighbors to search. Default: 10"
+        "--cosine-verify",
+        type=float,
+        default=0.90,
+        help="Cosine threshold requiring pHash verification. Default: 0.90",
+    )
+
+    parser.add_argument(
+        "--cosine-review",
+        type=float,
+        default=0.85,
+        help="Review-only cosine threshold. Default: 0.85",
+    )
+
+    parser.add_argument(
+        "--phash-auto-distance",
+        type=int,
+        default=4,
+        help="Auto-duplicate pHash distance. Default: 4",
+    )
+
+    parser.add_argument(
+        "--phash-verify-distance",
+        type=int,
+        default=8,
+        help="pHash distance required with --cosine-verify. Default: 8",
+    )
+
+    parser.add_argument(
+        "--k", type=int, default=50, help="Top-k neighbors to search. Default: 50"
     )
 
     parser.add_argument(
@@ -77,7 +107,19 @@ def parse_args():
     parser.add_argument(
         "--inplace",
         action="store_true",
-        help="Delete duplicates immediately (default is dry run)",
+        help="Move duplicates to .imgdedup/trash immediately (default is dry run)",
+    )
+
+    parser.add_argument(
+        "--hard-delete",
+        action="store_true",
+        help="Permanently delete duplicates instead of moving to trash. Requires --yes.",
+    )
+
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm destructive hard-delete mode.",
     )
 
     parser.add_argument(
@@ -104,6 +146,14 @@ def validate_args(args):
         )
         sys.exit(1)
 
+    if args.cosine_review > args.cosine_verify or args.cosine_verify > args.cosine_auto:
+        print("Error: cosine thresholds must satisfy review <= verify <= auto")
+        sys.exit(1)
+
+    if args.hard_delete and not args.yes:
+        print("Error: --hard-delete requires --yes")
+        sys.exit(1)
+
     # Set default report path
     if args.report is None:
         args.report = os.path.join(args.folder, "dedup_report.json")
@@ -116,15 +166,23 @@ def print_config(args):
     print("=" * 60)
     print(f"Folder: {args.folder}")
     print(f"Model: {args.model}")
-    print(f"Threshold: {args.threshold}")
+    print(f"Cosine auto threshold: {args.cosine_auto}")
+    print(f"Cosine verify threshold: {args.cosine_verify}")
+    print(f"Cosine review threshold: {args.cosine_review}")
+    print(f"pHash auto distance: {args.phash_auto_distance}")
+    print(f"pHash verify distance: {args.phash_verify_distance}")
     print(f"Top-k: {args.k}")
     print(f"Batch size: {args.batch_size}")
     print(f"GPUs to use: {args.gpus if args.gpus is not None else 'all available'}")
     print(f"GPU memory fraction: {args.gpu_memory_fraction}")
     print(f"Keep policy: {args.keep_policy}")
-    print(
-        f"Mode: {'IN-PLACE (will delete)' if args.inplace else 'DRY RUN (no deletion)'}"
-    )
+    if args.inplace and args.hard_delete:
+        mode = "IN-PLACE HARD DELETE"
+    elif args.inplace:
+        mode = "IN-PLACE MOVE TO TRASH"
+    else:
+        mode = "DRY RUN (no deletion)"
+    print(f"Mode: {mode}")
     print(f"Report: {args.report}")
     print("=" * 60)
     print()
@@ -142,7 +200,7 @@ def main():
     print()
 
     # Step 1: Scan images
-    print("[1/5] Scanning for images...")
+    print("[1/6] Scanning for images...")
     records = scan_images(args.folder)
 
     if not records:
@@ -151,8 +209,24 @@ def main():
 
     print(f"Found {len(records)} images\n")
 
-    # Step 2: Extract features
-    print("[2/5] Extracting CLIP features...")
+    # Step 2: Compute exact and perceptual hashes
+    print("[2/6] Computing sha256 and pHash...")
+    for record in tqdm(records, desc="Hashing images"):
+        try:
+            record.sha256 = compute_sha256(record.path)
+        except OSError as e:
+            print(f"Warning: Could not compute sha256 for {record.path}: {e}")
+
+        try:
+            record.phash, record.width, record.height = compute_image_metadata(record.path)
+        except ImportError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    print()
+
+    # Step 3: Extract features
+    print("[3/6] Extracting CLIP features...")
     features, valid_indices = extract_clip_features_multigpu(
         records,
         model_name=args.model,
@@ -167,19 +241,28 @@ def main():
 
     print(f"Extracted features: {features.shape}\n")
 
-    # Step 3: Build duplicate groups
-    print("[3/5] Building duplicate groups with FAISS...")
-    groups = build_groups_clip(
-        records, features, valid_indices, threshold=args.threshold, k=args.k
+    # Step 4: Build duplicate groups
+    print("[4/6] Building duplicate groups with sha256, pHash, and FAISS...")
+    thresholds = MatchThresholds(
+        cosine_auto=args.cosine_auto,
+        cosine_verify=args.cosine_verify,
+        cosine_review=args.cosine_review,
+        phash_auto_distance=args.phash_auto_distance,
+        phash_verify_distance=args.phash_verify_distance,
+    )
+    duplicate_pairs, review_pairs, groups = find_duplicate_pairs(
+        records, features, valid_indices, thresholds=thresholds, k=args.k
     )
 
     print(f"Found {len(groups)} duplicate groups")
+    print(f"Duplicate pairs: {len(duplicate_pairs)}")
+    print(f"Review-only pairs: {len(review_pairs)}")
     total_duplicates = sum(len(g) - 1 for g in groups)
     print(f"Total duplicates to remove: {total_duplicates}\n")
 
-    # Step 4: Generate report
-    print("[4/5] Generating report...")
-    report = make_report(records, groups, args.keep_policy)
+    # Step 5: Generate report
+    print("[5/6] Generating report...")
+    report = make_report(records, groups, args.keep_policy, duplicate_pairs, review_pairs)
 
     # Save report
     os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
@@ -193,18 +276,25 @@ def main():
     print(f"  Total images scanned: {report['total_images']}")
     print(f"  Duplicate groups found: {report['duplicate_groups']}")
     print(f"  Files to be removed: {report['total_duplicates']}")
+    print(f"  Review-only pairs: {report['review_only_pairs']}")
 
-    # Step 5: Delete if inplace
+    # Step 6: Delete if inplace
     if args.inplace:
-        print("\n[5/5] Deleting duplicates...")
-        result = delete_duplicates(report)
+        action = "hard-deleting" if args.hard_delete else "moving duplicates to trash"
+        print(f"\n[6/6] Applying report by {action}...")
+        delete_mode = "hard-delete" if args.hard_delete else "move"
+        result = delete_duplicates(report, args.folder, mode=delete_mode)
 
         # Print detailed cleanup summary
         print(f"\nCleanup Summary:")
+        print(f"  Run ID: {result['run_id']}")
         print(f"  Total files processed: {result['total_attempted']}")
+        print(f"  Successfully moved: {result['successfully_moved']}")
         print(f"  Successfully deleted: {result['successfully_deleted']}")
         print(f"  Already removed: {result['already_deleted']}")
         print(f"  Actual errors: {result['actual_errors']}")
+        if result['manifest_path']:
+            print(f"  Restore manifest: {result['manifest_path']}")
 
         if result["actual_errors"] > 0:
             print(f"\nEncountered {result['actual_errors']} real errors:")
@@ -217,11 +307,15 @@ def main():
                 print(
                     f"✓ Successfully deleted {result['successfully_deleted']} duplicate files"
                 )
+            if result["successfully_moved"] > 0:
+                print(
+                    f"✓ Successfully moved {result['successfully_moved']} duplicate files to trash"
+                )
             if result["already_deleted"] > 0:
                 print(f"✓ Found {result['already_deleted']} files already removed")
     else:
         print("\nDry run complete. No files deleted.")
-        print(f"To delete duplicates, run again with --inplace flag")
+        print(f"To move duplicates to trash, run again with --inplace flag")
 
     print("\nDone.")
 
