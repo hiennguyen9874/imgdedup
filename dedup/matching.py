@@ -88,6 +88,7 @@ def _make_pair(
     b: int,
     cosine: Optional[float],
     thresholds: MatchThresholds,
+    phash_dist: Optional[int] = None,
 ) -> DuplicatePair:
     if a > b:
         a, b = b, a
@@ -95,7 +96,8 @@ def _make_pair(
     left = records[a]
     right = records[b]
     same_sha = bool(left.sha256 and right.sha256 and left.sha256 == right.sha256)
-    phash_dist = phash_distance(left.phash, right.phash)
+    if phash_dist is None:
+        phash_dist = phash_distance(left.phash, right.phash)
     decision, reason, confidence = decide_pair(same_sha, phash_dist, cosine, thresholds)
 
     return DuplicatePair(
@@ -142,29 +144,85 @@ def _iter_exact_sha_pairs(records: List[ImgRec]) -> Iterable[Tuple[int, int]]:
                 yield left, right
 
 
-def _iter_phash_pairs(records: List[ImgRec], max_distance: int) -> Iterable[Tuple[int, int]]:
-    """Yield pHash-near candidates using 4-bit band buckets instead of all pairs."""
-    buckets: Dict[Tuple[int, str], List[Tuple[int, str]]] = {}
+def _hamming_distance(left: int, right: int) -> int:
+    return (left ^ right).bit_count()
+
+
+class _BKTreeNode:
+    def __init__(self, value: int, index: int) -> None:
+        self.value = value
+        self.indices = [index]
+        self.children: Dict[int, "_BKTreeNode"] = {}
+
+
+class _BKTree:
+    """Exact metric-radius index for pHash Hamming distance lookups."""
+
+    def __init__(self) -> None:
+        self.root: Optional[_BKTreeNode] = None
+
+    def add(self, value: int, index: int) -> None:
+        if self.root is None:
+            self.root = _BKTreeNode(value, index)
+            return
+
+        node = self.root
+        while True:
+            distance = _hamming_distance(value, node.value)
+            if distance == 0:
+                node.indices.append(index)
+                return
+
+            child = node.children.get(distance)
+            if child is None:
+                node.children[distance] = _BKTreeNode(value, index)
+                return
+            node = child
+
+    def query(self, value: int, max_distance: int) -> Iterable[Tuple[int, int]]:
+        if self.root is None:
+            return
+
+        pending = [self.root]
+        while pending:
+            node = pending.pop()
+            distance = _hamming_distance(value, node.value)
+            if distance <= max_distance:
+                for index in node.indices:
+                    yield index, distance
+
+            lower = distance - max_distance
+            upper = distance + max_distance
+            for edge_distance, child in node.children.items():
+                if lower <= edge_distance <= upper:
+                    pending.append(child)
+
+
+def _iter_phash_pairs(records: List[ImgRec], max_distance: int) -> Iterable[Tuple[int, int, int]]:
+    """Yield all pHash pairs within max_distance using an exact BK-tree search."""
+    tree = _BKTree()
+    hashes: List[Tuple[int, int]] = []
+
     for idx, record in enumerate(records):
         if not record.phash:
             continue
-        normalized = record.phash.lower()
-        for pos, char in enumerate(normalized):
-            buckets.setdefault((pos, char), []).append((idx, normalized))
+        try:
+            value = int(record.phash, 16)
+        except ValueError:
+            continue
+        hashes.append((idx, value))
+        tree.add(value, idx)
 
     seen: Set[Tuple[int, int]] = set()
-    for bucket in buckets.values():
-        if len(bucket) < 2:
-            continue
-        for pos, (left_idx, left_hash) in enumerate(bucket):
-            for right_idx, right_hash in bucket[pos + 1 :]:
-                key = (left_idx, right_idx) if left_idx < right_idx else (right_idx, left_idx)
-                if key in seen:
-                    continue
-                seen.add(key)
-                distance = phash_distance(left_hash, right_hash)
-                if distance is not None and distance <= max_distance:
-                    yield key
+    for left_idx, left_hash in hashes:
+        for right_idx, distance in tree.query(left_hash, max_distance):
+            if left_idx == right_idx:
+                continue
+            key = (left_idx, right_idx) if left_idx < right_idx else (right_idx, left_idx)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield key[0], key[1], distance
 
 
 def _build_faiss_index(feats: np.ndarray):
@@ -197,20 +255,17 @@ def find_duplicate_pairs(
     for left, right in _iter_exact_sha_pairs(records):
         _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds))
 
-    for left, right in _iter_phash_pairs(records, thresholds.phash_auto_distance):
-        _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds))
-
     if len(valid_indices) > 0 and features.size > 0:
         feats = l2_normalize(features.astype(np.float32))
         feature_positions = {record_idx: pos for pos, record_idx in enumerate(valid_indices)}
 
-        for left, right in _iter_phash_pairs(records, thresholds.phash_verify_distance):
+        for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
             left_pos = feature_positions.get(left)
             right_pos = feature_positions.get(right)
             cosine = None
             if left_pos is not None and right_pos is not None:
                 cosine = float(np.dot(feats[left_pos], feats[right_pos]))
-            _upsert_pair(pairs, _make_pair(records, left, right, cosine, thresholds))
+            _upsert_pair(pairs, _make_pair(records, left, right, cosine, thresholds, phash_dist))
 
         index = _build_faiss_index(feats)
         index.add(feats)
@@ -237,11 +292,15 @@ def find_duplicate_pairs(
 
                 score = float(score)
                 if score < thresholds.cosine_review:
-                    continue
+                    break
 
                 pair = _make_pair(records, record_idx, neighbor_record_idx, score, thresholds)
                 if pair.decision != "ignore":
                     _upsert_pair(pairs, pair)
+    else:
+        for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
+            if phash_dist <= thresholds.phash_auto_distance:
+                _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds, phash_dist))
 
     duplicate_pairs = [pair for pair in pairs.values() if pair.decision == "duplicate"]
     review_pairs = [pair for pair in pairs.values() if pair.decision == "review"]
