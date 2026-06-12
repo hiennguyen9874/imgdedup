@@ -8,6 +8,7 @@ dependencies = [
     "imagehash>=4.3.2",
     "matplotlib>=3.10.7",
     "numpy<2",
+    "scikit-learn>=1.7.2",
     "setuptools>=80.9.0",
     "torch==2.5.1",
     "torchaudio==2.5.1",

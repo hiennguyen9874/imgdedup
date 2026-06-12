@@ -6,6 +6,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -230,6 +231,69 @@ def _iter_phash_pairs(records: List[ImgRec], max_distance: int) -> Iterable[Tupl
             yield key[0], key[1], distance
 
 
+def _split_group_agglomerative(
+    group: List[int],
+    feats: np.ndarray,
+    feature_positions: Dict[int, int],
+    cosine_threshold: float,
+    linkage: str,
+) -> List[List[int]]:
+    if len(group) < 3:
+        return [group]
+
+    positions = []
+    for record_idx in group:
+        position = feature_positions.get(record_idx)
+        if position is None:
+            return [group]
+        positions.append(position)
+
+    try:
+        from sklearn.cluster import AgglomerativeClustering
+    except ImportError as exc:
+        raise ImportError(
+            "--grouping agglomerative requires scikit-learn to be installed"
+        ) from exc
+
+    group_feats = feats[positions]
+    distances = 1.0 - np.clip(group_feats @ group_feats.T, -1.0, 1.0)
+    np.fill_diagonal(distances, 0.0)
+
+    kwargs = {
+        "n_clusters": None,
+        "distance_threshold": 1.0 - cosine_threshold,
+        "linkage": linkage,
+    }
+    try:
+        clusterer = AgglomerativeClustering(metric="precomputed", **kwargs)
+    except TypeError:
+        clusterer = AgglomerativeClustering(affinity="precomputed", **kwargs)
+
+    labels = clusterer.fit_predict(distances)
+    clusters: Dict[int, List[int]] = defaultdict(list)
+    for record_idx, label in zip(group, labels):
+        clusters[int(label)].append(record_idx)
+
+    return [cluster for cluster in clusters.values() if len(cluster) > 1]
+
+
+def _split_groups_agglomerative(
+    groups: List[List[int]],
+    feats: np.ndarray,
+    feature_positions: Dict[int, int],
+    cosine_threshold: float,
+    linkage: str,
+) -> List[List[int]]:
+    split_groups = []
+    for group in groups:
+        split_groups.extend(
+            _split_group_agglomerative(
+                group, feats, feature_positions, cosine_threshold, linkage
+            )
+        )
+    return split_groups
+
+
 def _build_faiss_index(feats: np.ndarray):
     dim = feats.shape[1]
     if torch.cuda.is_available() and faiss.get_num_gpus() > 0:
@@ -250,6 +314,9 @@ def find_duplicate_pairs(
     faiss_index_path: Optional[str] = None,
     show_timings: bool = True,
     cross_folder_only: bool = False,
+    grouping_method: str = "connected",
+    agglomerative_linkage: str = "complete",
+    agglomerative_cosine_threshold: Optional[float] = None,
 ) -> Tuple[List[DuplicatePair], List[DuplicatePair], List[List[int]]]:
     """
     Find duplicate and review-only pairs, then group duplicates.
@@ -259,6 +326,8 @@ def find_duplicate_pairs(
     """
     pairs: Dict[Tuple[int, int], DuplicatePair] = {}
     timings: Dict[str, float] = {}
+    feats = np.empty((0, 0), dtype=np.float32)
+    feature_positions: Dict[int, int] = {}
 
     started = time.perf_counter()
     for left, right in _iter_exact_sha_pairs(records):
@@ -347,6 +416,24 @@ def find_duplicate_pairs(
 
     groups = [group for group in uf.get_groups() if len(group) > 1]
     timings["grouping"] = time.perf_counter() - started
+
+    if grouping_method == "agglomerative":
+        started = time.perf_counter()
+        if feats.size == 0 or not feature_positions:
+            raise ValueError("Agglomerative grouping requires valid image features")
+        cosine_threshold = (
+            thresholds.cosine_auto
+            if agglomerative_cosine_threshold is None
+            else agglomerative_cosine_threshold
+        )
+        groups = _split_groups_agglomerative(
+            groups,
+            feats,
+            feature_positions,
+            cosine_threshold,
+            agglomerative_linkage,
+        )
+        timings["agglomerative split"] = time.perf_counter() - started
 
     if show_timings:
         print("Step 4 timings:")

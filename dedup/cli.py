@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 from tqdm import tqdm
@@ -120,6 +121,29 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--grouping",
+        type=str,
+        choices=["connected", "agglomerative"],
+        default="connected",
+        help="Duplicate grouping method. Default: connected",
+    )
+
+    parser.add_argument(
+        "--agglomerative-linkage",
+        type=str,
+        choices=["complete", "average"],
+        default="complete",
+        help="Linkage for --grouping agglomerative. Default: complete",
+    )
+
+    parser.add_argument(
+        "--agglomerative-cosine-threshold",
+        type=float,
+        default=None,
+        help="Cosine threshold for agglomerative splitting. Default: --cosine-auto",
+    )
+
+    parser.add_argument(
         "--inplace",
         action="store_true",
         help="Move duplicates to .imgdedup/trash immediately (default is dry run)",
@@ -175,6 +199,13 @@ def validate_args(args):
         print("Error: --hard-delete requires --yes")
         sys.exit(1)
 
+    if (
+        args.agglomerative_cosine_threshold is not None
+        and not -1.0 <= args.agglomerative_cosine_threshold <= 1.0
+    ):
+        print("Error: --agglomerative-cosine-threshold must be between -1.0 and 1.0")
+        sys.exit(1)
+
     if args.no_report and args.report is not None:
         print("Error: --no-report cannot be used with --report")
         sys.exit(1)
@@ -203,6 +234,15 @@ def print_config(args):
     print(f"GPU memory fraction: {args.gpu_memory_fraction}")
     print(f"Keep policy: {args.keep_policy}")
     print(f"Cross-folder only: {args.cross_folder_only}")
+    print(f"Grouping: {args.grouping}")
+    if args.grouping == "agglomerative":
+        agglomerative_threshold = (
+            args.cosine_auto
+            if args.agglomerative_cosine_threshold is None
+            else args.agglomerative_cosine_threshold
+        )
+        print(f"Agglomerative linkage: {args.agglomerative_linkage}")
+        print(f"Agglomerative cosine threshold: {agglomerative_threshold}")
     if args.inplace and args.hard_delete:
         mode = "IN-PLACE HARD DELETE"
     elif args.inplace:
@@ -325,6 +365,9 @@ def main():
         k=args.k,
         faiss_index_path=str(cache.faiss_index_path) if args.save_faiss_index else None,
         cross_folder_only=args.cross_folder_only,
+        grouping_method=args.grouping,
+        agglomerative_linkage=args.agglomerative_linkage,
+        agglomerative_cosine_threshold=args.agglomerative_cosine_threshold,
     )
 
     print(f"Found {len(groups)} duplicate groups")
@@ -335,16 +378,26 @@ def main():
 
     # Step 5: Generate report
     print("[5/6] Generating report...")
+    started = time.perf_counter()
     report = make_report(records, groups, args.keep_policy, duplicate_pairs, review_pairs)
+    report_build_seconds = time.perf_counter() - started
 
     # Save report
     if args.no_report:
-        print("Report writing disabled.\n")
+        print("Report writing disabled.")
+        print("Step 5 timings:")
+        print(f"  report build: {report_build_seconds:.2f}s")
+        print()
     else:
         os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
+        started = time.perf_counter()
         with open(args.report, "w") as f:
             json.dump(report, f, indent=2)
+        report_write_seconds = time.perf_counter() - started
 
+        print("Step 5 timings:")
+        print(f"  report build: {report_build_seconds:.2f}s")
+        print(f"  report write: {report_write_seconds:.2f}s")
         print(f"Report saved to: {args.report}\n")
 
     # Print summary

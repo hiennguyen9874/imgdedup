@@ -31,6 +31,25 @@ Review-only rule (reported but never auto-deleted):
 
 Review-only pairs are written to the JSON report under `review_only` and are never passed to deletion.
 
+## Duplicate grouping
+
+By default, duplicate pairs are grouped as connected components:
+
+```text
+A matches B, and B matches C => A, B, C are one duplicate group
+```
+
+For stricter grouping, use agglomerative splitting after pair matching:
+
+```bash
+uv run python main.py ./photos \
+  --grouping agglomerative \
+  --agglomerative-linkage complete \
+  --agglomerative-cosine-threshold 0.97
+```
+
+`complete` linkage is safest because all images in a cluster must stay within the threshold. `average` linkage is less strict and may keep larger groups.
+
 ## Install
 
 This project uses `uv`.
@@ -125,6 +144,7 @@ uv run python main.py ./photos \
   --phash-auto-distance 4 \
   --phash-verify-distance 8 \
   --cross-folder-only \
+  --grouping connected \
   --k 50
 ```
 
@@ -144,7 +164,11 @@ uv run python main.py ./photos \
 | `--gpu-memory-fraction` | `0.9` | GPU memory fraction per device (0.1–1.0) |
 | `--keep-policy` | `highest-resolution` | Which file to keep in each duplicate group |
 | `--cross-folder-only` | off | Only compare images from different immediate parent folders |
+| `--grouping` | `connected` | Group duplicates by connected components or `agglomerative` splitting |
+| `--agglomerative-linkage` | `complete` | Linkage for agglomerative grouping: `complete` or `average` |
+| `--agglomerative-cosine-threshold` | `--cosine-auto` | Cosine threshold used when splitting groups with agglomerative clustering |
 | `--report` | `<folder>/dedup_report.json` | Output path for the JSON report |
+| `--no-report` | off | Build the report summary but skip writing the JSON file |
 
 ### Keep policies
 
@@ -250,6 +274,8 @@ On subsequent runs, only new or changed files are processed — cached results a
 - **Default model**: `facebook/dinov3-vitb16-pretrain-lvd1689m` (vision-only transformer). Any Hugging Face vision embedding model can be used via `--model`.
 - **FAISS** is used for nearest-neighbor search (GPU-accelerated when available).
 - **pHash search** uses an in-memory BK-tree for exact Hamming-distance queries.
+- **Grouping** uses connected components by default, with optional agglomerative splitting for stricter clusters.
+- **Report generation** indexes duplicate pairs once, then writes JSON report output with separate build/write timings.
 - **Embeddings** are L2-normalized, so FAISS inner product equals cosine similarity.
 - **GPU support**: multi-GPU parallel extraction via `ThreadPoolExecutor`, with automatic fallback to single GPU or CPU.
 - **Flash Attention 2** is used when available, falling back to PyTorch SDPA or eager attention.

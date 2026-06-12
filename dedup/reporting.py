@@ -4,6 +4,7 @@ Report generation and representative selection functionality.
 
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
 
 from .filesystem import ImgRec
 from .matching import DuplicatePair
@@ -40,21 +41,29 @@ def _pair_key(left: int, right: int) -> Tuple[int, int]:
     return (left, right) if left < right else (right, left)
 
 
+def _build_pair_indexes(
+    duplicate_pairs: List[DuplicatePair],
+) -> Tuple[Dict[Tuple[int, int], DuplicatePair], Dict[int, List[DuplicatePair]]]:
+    pair_by_key = {}
+    pairs_by_image = defaultdict(list)
+    for pair in duplicate_pairs:
+        pair_by_key[_pair_key(pair.a, pair.b)] = pair
+        pairs_by_image[pair.a].append(pair)
+        pairs_by_image[pair.b].append(pair)
+    return pair_by_key, pairs_by_image
+
+
 def _best_pair_for_duplicate(
     keep_idx: int,
     duplicate_idx: int,
-    duplicate_pairs: List[DuplicatePair],
+    pair_by_key: Dict[Tuple[int, int], DuplicatePair],
+    pairs_by_image: Dict[int, List[DuplicatePair]],
 ) -> Optional[DuplicatePair]:
-    pair_by_key = {_pair_key(pair.a, pair.b): pair for pair in duplicate_pairs}
     direct = pair_by_key.get(_pair_key(keep_idx, duplicate_idx))
     if direct is not None:
         return direct
 
-    related = [
-        pair
-        for pair in duplicate_pairs
-        if pair.a == duplicate_idx or pair.b == duplicate_idx
-    ]
+    related = pairs_by_image.get(duplicate_idx, [])
     if not related:
         return None
 
@@ -88,6 +97,7 @@ def make_report(
     review_pairs = review_pairs or []
     report_groups = []
     total_duplicates = 0
+    pair_by_key, pairs_by_image = _build_pair_indexes(duplicate_pairs)
 
     for group in groups:
         rep_idx = pick_representative(group, records, keep_policy)
@@ -97,7 +107,7 @@ def make_report(
             if idx == rep_idx:
                 continue
 
-            pair = _best_pair_for_duplicate(rep_idx, idx, duplicate_pairs)
+            pair = _best_pair_for_duplicate(rep_idx, idx, pair_by_key, pairs_by_image)
             duplicates.append(
                 {
                     "path": records[idx].path,
