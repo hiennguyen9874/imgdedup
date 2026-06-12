@@ -104,6 +104,8 @@ uv run python main.py ./photos --inplace --hard-delete --yes
 
 Without `--yes`, hard delete is rejected.
 
+> **⚠️ Note**: `--inplace` is required. Running `--hard-delete --yes` without `--inplace` is a no-op dry run — the tool will print "DRY RUN" and exit without deleting anything.
+
 ## Useful options
 
 ```bash
