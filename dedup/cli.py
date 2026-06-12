@@ -15,9 +15,9 @@ from tqdm import tqdm
 from .hardware import print_gpu_info
 
 from .cache import DedupCache, build_feature_matrix
-from .filesystem import scan_images
+from .filesystem import ImgRec, scan_images
 from .hashing import compute_image_metadata, compute_sha256
-from .matching import MatchThresholds, find_duplicate_pairs
+from .matching import MatchThresholds, find_duplicate_pairs, find_matches_to_reference
 from .models import extract_clip_features_multigpu
 from .reporting import make_report
 from .deletion import delete_duplicates
@@ -25,6 +25,35 @@ from .deletion import delete_duplicates
 
 def parse_args():
     """Parse command line arguments"""
+    if len(sys.argv) > 1 and sys.argv[1] == "remove-like":
+        parser = argparse.ArgumentParser(
+            description="Remove images in a folder that match one input image",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument("command", choices=["remove-like"])
+        parser.add_argument("folder", help="Folder to scan recursively for images to remove")
+        parser.add_argument("image", help="Reference image to compare against the folder")
+        parser.add_argument("--cosine-auto", type=float, default=0.97, help="Auto-duplicate cosine threshold. Default: 0.97")
+        parser.add_argument("--cosine-verify", type=float, default=0.90, help="Cosine threshold requiring pHash verification. Default: 0.90")
+        parser.add_argument("--cosine-review", type=float, default=0.85, help="Review-only cosine threshold. Default: 0.85")
+        parser.add_argument("--phash-auto-distance", type=int, default=4, help="Auto-duplicate pHash distance. Default: 4")
+        parser.add_argument("--phash-verify-distance", type=int, default=8, help="pHash distance required with --cosine-verify. Default: 8")
+        parser.add_argument("--batch-size", type=int, default=128, help="Batch size for inference. Default: 128")
+        parser.add_argument("--metadata-workers", type=int, default=min(32, (os.cpu_count() or 1)), help="Parallel workers for sha256 and pHash metadata. Default: min(32, CPU count)")
+        parser.add_argument("--loader-workers", type=int, default=0, help="PyTorch DataLoader workers for image loading. Default: 0")
+        parser.add_argument("--model", type=str, default="facebook/dinov3-vitb16-pretrain-lvd1689m", help="Hugging Face model name. Default: facebook/dinov3-vitb16-pretrain-lvd1689m")
+        parser.add_argument("--gpus", type=int, default=None, help="Number of GPUs to use for parallel processing. Default: all available")
+        parser.add_argument("--gpu-memory-fraction", type=float, default=0.9, help="GPU memory fraction to use per GPU (0.1-1.0). Default: 0.9")
+        parser.add_argument("--inplace", action="store_true", help="Move matching folder images to .imgdedup/trash immediately (default is dry run)")
+        parser.add_argument("--hard-delete", action="store_true", help="Permanently delete matching folder images instead of moving to trash. Requires --yes.")
+        parser.add_argument("--yes", action="store_true", help="Confirm destructive hard-delete mode.")
+        parser.add_argument("--report", type=str, default=None, help="Path to output JSON report. Default: <folder>/remove_like_report.json")
+        parser.add_argument("--no-report", action="store_true", help="Do not write a JSON report file.")
+        args = parser.parse_args()
+        args.remove_like = True
+        args.folders = [args.folder]
+        return args
+
     parser = argparse.ArgumentParser(
         description="Image deduplication tool using CLIP semantic similarity",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -200,6 +229,10 @@ def validate_args(args):
             print(f"Error: {folder} is not a valid directory")
             sys.exit(1)
 
+    if getattr(args, "remove_like", False) and not os.path.isfile(args.image):
+        print(f"Error: {args.image} is not a valid file")
+        sys.exit(1)
+
     # Validate GPU memory fraction
     if not 0.1 <= args.gpu_memory_fraction <= 1.0:
         print(
@@ -237,7 +270,8 @@ def validate_args(args):
     # Set default report path
     if not args.no_report and args.report is None:
         report_root = args.folders[0] if len(args.folders) == 1 else os.getcwd()
-        args.report = os.path.join(report_root, "dedup_report.json")
+        report_name = "remove_like_report.json" if getattr(args, "remove_like", False) else "dedup_report.json"
+        args.report = os.path.join(report_root, report_name)
 
     args.cache_root = args.folders[0] if len(args.folders) == 1 else os.getcwd()
 
@@ -302,10 +336,230 @@ def _compute_missing_metadata(record):
     return sha256, phash, width, height
 
 
+def _file_record(path):
+    stat = os.stat(path)
+    return ImgRec(path=os.path.abspath(path), size=stat.st_size, mtime=stat.st_mtime)
+
+
+def _prepare_records(records, args, cache):
+    started = time.perf_counter()
+    cached_metadata = cache.apply_cached_metadata(records)
+    cache_apply_seconds = time.perf_counter() - started
+    print(f"Computing sha256 and pHash... ({cached_metadata} metadata cache hits)")
+    records_to_hash = [
+        record
+        for record in records
+        if not (
+            record.sha256 is not None
+            and record.phash is not None
+            and record.width is not None
+            and record.height is not None
+        )
+    ]
+
+    hash_started = time.perf_counter()
+    if records_to_hash:
+        worker_count = min(args.metadata_workers, len(records_to_hash))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_to_record = {
+                executor.submit(_compute_missing_metadata, record): record
+                for record in records_to_hash
+            }
+            for future in tqdm(
+                as_completed(future_to_record),
+                total=len(future_to_record),
+                desc="Hashing images",
+            ):
+                record = future_to_record[future]
+                try:
+                    record.sha256, record.phash, record.width, record.height = future.result()
+                    cache.update_metadata(record)
+                except ImportError as e:
+                    print(f"Error: {e}")
+                    cache.close()
+                    sys.exit(1)
+                except OSError as e:
+                    print(f"Warning: Could not compute metadata for {record.path}: {e}")
+    hash_seconds = time.perf_counter() - hash_started
+
+    commit_started = time.perf_counter()
+    cache.conn.commit()
+    commit_seconds = time.perf_counter() - commit_started
+    print("Metadata timings:")
+    print(f"  cache apply: {cache_apply_seconds:.2f}s")
+    print(f"  metadata compute: {hash_seconds:.2f}s")
+    print(f"  cache commit: {commit_seconds:.2f}s")
+    print()
+
+    feature_step_started = time.perf_counter()
+    missing_embedding_indices = [
+        idx for idx, record in enumerate(records) if cache.get_embedding(record, args.model) is None
+    ]
+    print(
+        f"Extracting CLIP features... ({len(records) - len(missing_embedding_indices)} embedding cache hits)"
+    )
+    if missing_embedding_indices:
+        records_to_extract = [records[idx] for idx in missing_embedding_indices]
+        extracted_features, extracted_indices = extract_clip_features_multigpu(
+            records_to_extract,
+            model_name=args.model,
+            batch_size=args.batch_size,
+            num_gpus=args.gpus,
+            gpu_memory_fraction=args.gpu_memory_fraction,
+            loader_workers=args.loader_workers,
+        )
+        extracted_indices = [missing_embedding_indices[idx] for idx in extracted_indices]
+    else:
+        extracted_features = None
+        extracted_indices = []
+
+    if extracted_features is None:
+        extracted_features = np.empty((0, 0), dtype=np.float32)
+
+    matrix_started = time.perf_counter()
+    features, valid_indices, embedding_cache_hits = build_feature_matrix(
+        cache,
+        records,
+        args.model,
+        extracted_features,
+        extracted_indices,
+    )
+    matrix_seconds = time.perf_counter() - matrix_started
+
+    save_started = time.perf_counter()
+    cache.save_embeddings(records, features, valid_indices, args.model)
+    embedding_save_seconds = time.perf_counter() - save_started
+    feature_step_seconds = time.perf_counter() - feature_step_started
+    print(f"Extracted/reused features: {features.shape} ({embedding_cache_hits} reused from cache)")
+    print("Feature timings:")
+    print(f"  feature matrix build: {matrix_seconds:.2f}s")
+    print(f"  embedding cache save: {embedding_save_seconds:.2f}s")
+    print(f"  total: {feature_step_seconds:.2f}s\n")
+    return features, valid_indices
+
+
+def _reference_report(records, reference_idx, duplicate_pairs, review_pairs):
+    duplicates = []
+    for pair in duplicate_pairs:
+        duplicate_idx = pair.b if pair.a == reference_idx else pair.a
+        duplicates.append(
+            {
+                "path": records[duplicate_idx].path,
+                "reason": pair.reason,
+                "cosine": pair.cosine,
+                "phash_distance": pair.phash_distance,
+                "same_sha256": pair.same_sha256,
+                "confidence": pair.confidence,
+            }
+        )
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "reference_image": records[reference_idx].path,
+        "total_images": len(records) - 1,
+        "duplicate_groups": 1 if duplicates else 0,
+        "total_duplicates": len(duplicates),
+        "review_only_pairs": len(review_pairs),
+        "groups": [{"keep": records[reference_idx].path, "duplicates": duplicates}] if duplicates else [],
+        "review_only": [
+            {
+                "a": records[pair.a].path,
+                "b": records[pair.b].path,
+                "cosine": pair.cosine,
+                "phash_distance": pair.phash_distance,
+                "same_sha256": pair.same_sha256,
+                "decision": pair.decision,
+                "reason": pair.reason,
+                "confidence": pair.confidence,
+            }
+            for pair in review_pairs
+        ],
+    }
+
+
+def run_remove_like(args):
+    print("=" * 60)
+    print("Remove Images Matching Reference")
+    print("=" * 60)
+    print(f"Folder: {args.folder}")
+    print(f"Reference image: {args.image}")
+    print(f"Model: {args.model}")
+    print(f"Mode: {'IN-PLACE HARD DELETE' if args.inplace and args.hard_delete else 'IN-PLACE MOVE TO TRASH' if args.inplace else 'DRY RUN (no deletion)'}")
+    print(f"Report: {'disabled' if args.no_report else args.report}")
+    print("=" * 60)
+    print()
+
+    print_gpu_info()
+    print()
+
+    print("[1/5] Scanning folder and reference image...")
+    folder_records = scan_images(args.folder)
+    if not folder_records:
+        print("No images found in folder. Exiting.")
+        sys.exit(0)
+
+    reference_idx = 0
+    records = [_file_record(args.image)] + folder_records
+    candidate_indices = list(range(1, len(records)))
+    print(f"Found {len(folder_records)} folder images")
+
+    cache = DedupCache(args.cache_root)
+    print("[2/5] Preparing hashes and embeddings...")
+    features, valid_indices = _prepare_records(records, args, cache)
+    if reference_idx not in valid_indices:
+        print("No valid reference image features to process. Exiting.")
+        cache.close()
+        sys.exit(1)
+
+    print("[3/5] Comparing folder images to reference...")
+    thresholds = MatchThresholds(
+        cosine_auto=args.cosine_auto,
+        cosine_verify=args.cosine_verify,
+        cosine_review=args.cosine_review,
+        phash_auto_distance=args.phash_auto_distance,
+        phash_verify_distance=args.phash_verify_distance,
+    )
+    duplicate_pairs, review_pairs = find_matches_to_reference(
+        records, features, valid_indices, reference_idx, candidate_indices, thresholds
+    )
+    report = _reference_report(records, reference_idx, duplicate_pairs, review_pairs)
+    print(f"Matching folder images to remove: {report['total_duplicates']}")
+    print(f"Review-only pairs: {report['review_only_pairs']}\n")
+
+    print("[4/5] Generating report...")
+    if args.no_report:
+        print("Report writing disabled.")
+    else:
+        os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
+        with open(args.report, "w") as f:
+            json.dump(report, f, indent=2)
+        print(f"Report saved to: {args.report}")
+
+    if args.inplace:
+        print("\n[5/5] Applying report...")
+        delete_mode = "hard-delete" if args.hard_delete else "move"
+        result = delete_duplicates(report, [args.folder], mode=delete_mode)
+        print(f"Successfully moved: {result['successfully_moved']}")
+        print(f"Successfully deleted: {result['successfully_deleted']}")
+        print(f"Actual errors: {result['actual_errors']}")
+        if result['manifest_path']:
+            print(f"Restore manifest: {result['manifest_path']}")
+    else:
+        print("\nDry run complete. No files deleted.")
+        print("To move matches to trash, run again with --inplace flag")
+
+    cache.close()
+    print("\nDone.")
+
+
 def main():
     """Main entry point for the CLI"""
     args = parse_args()
     validate_args(args)
+
+    if getattr(args, "remove_like", False):
+        run_remove_like(args)
+        return
 
     print_config(args)
 

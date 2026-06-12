@@ -101,10 +101,48 @@ When scanning multiple folders, the default report path is:
 
 No files are deleted in dry-run mode.
 
+## Remove images matching one input image
+
+Use `remove-like` when you have one reference image and want to remove matching images from a folder. The reference image is kept; only matching images inside the scanned folder are reported or removed.
+
+Dry run:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg
+```
+
+This uses the same duplicate rules as the normal de-dup scan, but compares each folder image only against `./reference.jpg`.
+
+Default report path:
+
+```text
+./photos/remove_like_report.json
+```
+
+Move matching folder images to trash:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg --inplace
+```
+
+Hard delete matching folder images after reviewing the report:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg --inplace --hard-delete --yes
+```
+
+No files are deleted in dry-run mode.
+
 ## Write report to custom path
 
 ```bash
 uv run python main.py ./photos --report ./dedup_report.json
+```
+
+For `remove-like`:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg --report ./remove_like_report.json
 ```
 
 ## Compare only across folders
@@ -193,6 +231,8 @@ uv run python main.py ./photos \
 | `--report` | `<folder>/dedup_report.json` or `./dedup_report.json` for multiple folders | Output path for the JSON report |
 | `--no-report` | off | Build the report summary but skip writing the JSON file |
 
+For `remove-like`, positional arguments are `folder` and `image` instead of `folders`. It supports the same threshold, model, GPU, report, `--inplace`, `--hard-delete`, and `--yes` options, but does not use duplicate grouping, keep policy, `--k`, cross-folder comparison, or FAISS index saving.
+
 ## Recommended settings
 
 ### Small datasets
@@ -239,6 +279,8 @@ uv run python main.py ./photos --keep-policy largest
 ```
 
 ## Report format
+
+Normal de-dup reports use the format below. `remove-like` reports use the same `groups` and `review_only` shape, with the reference image as `keep`, but include `reference_image` instead of `keep_policy`.
 
 Example report with one duplicate group:
 

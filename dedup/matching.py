@@ -306,6 +306,39 @@ def _build_faiss_index(feats: np.ndarray):
     return faiss.IndexFlatIP(dim)
 
 
+def find_matches_to_reference(
+    records: List[ImgRec],
+    features: np.ndarray,
+    valid_indices: List[int],
+    reference_idx: int,
+    candidate_indices: List[int],
+    thresholds: MatchThresholds,
+) -> Tuple[List[DuplicatePair], List[DuplicatePair]]:
+    """Compare one reference image against candidate images using duplicate policy."""
+    pairs: Dict[Tuple[int, int], DuplicatePair] = {}
+    feats = np.empty((0, 0), dtype=np.float32)
+    feature_positions: Dict[int, int] = {}
+
+    if len(valid_indices) > 0 and features.size > 0:
+        feats = l2_normalize(features.astype(np.float32))
+        feature_positions = {record_idx: pos for pos, record_idx in enumerate(valid_indices)}
+
+    reference_pos = feature_positions.get(reference_idx)
+    for candidate_idx in candidate_indices:
+        cosine = None
+        candidate_pos = feature_positions.get(candidate_idx)
+        if reference_pos is not None and candidate_pos is not None:
+            cosine = float(np.dot(feats[reference_pos], feats[candidate_pos]))
+
+        pair = _make_pair(records, reference_idx, candidate_idx, cosine, thresholds)
+        if pair.decision != "ignore":
+            _upsert_pair(pairs, pair)
+
+    duplicate_pairs = [pair for pair in pairs.values() if pair.decision == "duplicate"]
+    review_pairs = [pair for pair in pairs.values() if pair.decision == "review"]
+    return duplicate_pairs, review_pairs
+
+
 def find_duplicate_pairs(
     records: List[ImgRec],
     features: np.ndarray,
