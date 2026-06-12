@@ -449,6 +449,7 @@ def main():
         thresholds=thresholds,
         k=args.k,
         faiss_index_path=str(cache.faiss_index_path) if args.save_faiss_index else None,
+        show_progress=True,
         cross_folder_only=args.cross_folder_only,
         grouping_method=args.grouping,
         agglomerative_linkage=args.agglomerative_linkage,

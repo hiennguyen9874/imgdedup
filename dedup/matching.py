@@ -10,6 +10,7 @@ from collections import defaultdict
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 try:
     import faiss
@@ -313,6 +314,7 @@ def find_duplicate_pairs(
     k: int = 50,
     faiss_index_path: Optional[str] = None,
     show_timings: bool = True,
+    show_progress: bool = False,
     cross_folder_only: bool = False,
     grouping_method: str = "connected",
     agglomerative_linkage: str = "complete",
@@ -371,32 +373,50 @@ def find_duplicate_pairs(
 
         k_eff = min(k, len(valid_indices))
         print(f"Searching top-{k_eff} neighbors...")
-        started = time.perf_counter()
-        similarities, neighbor_ids = index.search(feats, k_eff)
-        timings["FAISS search"] = time.perf_counter() - started
+        search_seconds = 0.0
+        classification_seconds = 0.0
+        batch_size = 1024
+        batches = range(0, len(valid_indices), batch_size)
+        if show_progress:
+            batches = tqdm(
+                batches,
+                total=(len(valid_indices) + batch_size - 1) // batch_size,
+                desc="FAISS search/classify",
+                unit="batch",
+            )
 
-        started = time.perf_counter()
-        for local_idx, record_idx in enumerate(valid_indices):
-            for score, neighbor_local_idx in zip(similarities[local_idx], neighbor_ids[local_idx]):
-                if neighbor_local_idx < 0 or neighbor_local_idx == local_idx:
-                    continue
+        for start in batches:
+            end = min(start + batch_size, len(valid_indices))
+            started = time.perf_counter()
+            similarities, neighbor_ids = index.search(feats[start:end], k_eff)
+            search_seconds += time.perf_counter() - started
 
-                neighbor_record_idx = valid_indices[neighbor_local_idx]
-                if record_idx > neighbor_record_idx:
-                    continue
-                if cross_folder_only and _same_parent_folder(
-                    records, record_idx, neighbor_record_idx
-                ):
-                    continue
+            started = time.perf_counter()
+            for offset, record_idx in enumerate(valid_indices[start:end]):
+                local_idx = start + offset
+                for score, neighbor_local_idx in zip(similarities[offset], neighbor_ids[offset]):
+                    if neighbor_local_idx < 0 or neighbor_local_idx == local_idx:
+                        continue
 
-                score = float(score)
-                if score < thresholds.cosine_review:
-                    break
+                    neighbor_record_idx = valid_indices[neighbor_local_idx]
+                    if record_idx > neighbor_record_idx:
+                        continue
+                    if cross_folder_only and _same_parent_folder(
+                        records, record_idx, neighbor_record_idx
+                    ):
+                        continue
 
-                pair = _make_pair(records, record_idx, neighbor_record_idx, score, thresholds)
-                if pair.decision != "ignore":
-                    _upsert_pair(pairs, pair)
-        timings["pair classification"] = time.perf_counter() - started
+                    score = float(score)
+                    if score < thresholds.cosine_review:
+                        break
+
+                    pair = _make_pair(records, record_idx, neighbor_record_idx, score, thresholds)
+                    if pair.decision != "ignore":
+                        _upsert_pair(pairs, pair)
+            classification_seconds += time.perf_counter() - started
+
+        timings["FAISS search"] = search_seconds
+        timings["pair classification"] = classification_seconds
     else:
         started = time.perf_counter()
         for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
