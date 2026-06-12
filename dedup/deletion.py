@@ -2,49 +2,110 @@
 Safe file deletion operations with error handling and progress tracking.
 """
 
+import json
 import os
-from typing import Dict
+import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Iterable, Tuple
 from tqdm import tqdm
 
 
-def delete_duplicates(report: Dict) -> Dict:
+def _iter_duplicate_paths(report: Dict) -> Iterable[str]:
+    for group in report["groups"]:
+        for duplicate in group["duplicates"]:
+            if isinstance(duplicate, dict):
+                yield duplicate["path"]
+            else:
+                yield duplicate
+
+
+def _trash_path(root: str, run_id: str, original_path: str) -> str:
+    original = Path(original_path)
+    trash_root = Path(root).resolve() / ".imgdedup" / "trash" / run_id
+    try:
+        relative = original.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        relative = Path(original.name)
+
+    destination = trash_root / relative
+    if not destination.exists():
+        return str(destination)
+
+    suffix = 1
+    while True:
+        candidate = destination.with_name(f"{destination.stem}.{suffix}{destination.suffix}")
+        if not candidate.exists():
+            return str(candidate)
+        suffix += 1
+
+
+def delete_duplicates(
+    report: Dict,
+    root: str,
+    mode: str = "move",
+    run_id: str = None,
+) -> Dict:
     """
-    Delete duplicate files based on report.
-    Returns dict with statistics and any actual errors encountered.
+    Apply duplicate removal based on report.
+
+    mode="move" moves files into .imgdedup/trash/<run_id> and writes a restore
+    manifest. mode="hard-delete" removes files permanently.
     """
     errors = []
     already_deleted = []
-    successfully_deleted = 0
-    total_to_delete = sum(len(g["duplicates"]) for g in report["groups"])
+    actions = []
+    successfully_processed = 0
+    duplicate_paths = list(_iter_duplicate_paths(report))
+    run_id = run_id or datetime.now().strftime("run_%Y%m%d_%H%M%S")
 
-    with tqdm(total=total_to_delete, desc="Deleting duplicates") as pbar:
-        for group in report["groups"]:
-            for dup_path in group["duplicates"]:
-                try:
-                    # Check if file exists before trying to delete
-                    if not os.path.exists(dup_path):
-                        already_deleted.append(dup_path)
-                    else:
-                        os.remove(dup_path)
-                        successfully_deleted += 1
-                    pbar.update(1)
-                except OSError as e:
-                    # Handle specific OS errors
-                    if e.errno == 2:  # No such file or directory
-                        already_deleted.append(dup_path)
-                    else:
-                        errors.append(f"Failed to delete {dup_path}: {e}")
-                    pbar.update(1)
-                except Exception as e:
-                    errors.append(f"Failed to delete {dup_path}: {e}")
-                    pbar.update(1)
+    with tqdm(total=len(duplicate_paths), desc="Processing duplicates") as pbar:
+        for duplicate_path in duplicate_paths:
+            try:
+                if not os.path.exists(duplicate_path):
+                    already_deleted.append(duplicate_path)
+                elif mode == "hard-delete":
+                    os.remove(duplicate_path)
+                    successfully_processed += 1
+                else:
+                    destination = _trash_path(root, run_id, duplicate_path)
+                    os.makedirs(os.path.dirname(destination), exist_ok=True)
+                    shutil.move(duplicate_path, destination)
+                    actions.append(
+                        {
+                            "original_path": duplicate_path,
+                            "trash_path": destination,
+                        }
+                    )
+                    successfully_processed += 1
+                pbar.update(1)
+            except OSError as e:
+                if e.errno == 2:
+                    already_deleted.append(duplicate_path)
+                else:
+                    errors.append(f"Failed to process {duplicate_path}: {e}")
+                pbar.update(1)
+            except Exception as e:
+                errors.append(f"Failed to process {duplicate_path}: {e}")
+                pbar.update(1)
 
-    # Return detailed statistics
+    manifest_path = None
+    if mode != "hard-delete" and actions:
+        manifest_dir = Path(root).resolve() / ".imgdedup" / "trash" / run_id
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = str(manifest_dir / "restore_manifest.json")
+        with open(manifest_path, "w") as file_obj:
+            json.dump({"run_id": run_id, "actions": actions}, file_obj, indent=2)
+
     return {
-        "total_attempted": total_to_delete,
-        "successfully_deleted": successfully_deleted,
+        "run_id": run_id,
+        "mode": mode,
+        "manifest_path": manifest_path,
+        "total_attempted": len(duplicate_paths),
+        "successfully_deleted": successfully_processed if mode == "hard-delete" else 0,
+        "successfully_moved": successfully_processed if mode != "hard-delete" else 0,
         "already_deleted": len(already_deleted),
         "actual_errors": len(errors),
-        "error_details": errors[:10] if errors else [],  # Limit error details
+        "error_details": errors[:10] if errors else [],
         "has_more_errors": len(errors) > 10,
     }

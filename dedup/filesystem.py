@@ -5,7 +5,7 @@ File system operations for image scanning and workload distribution.
 import os
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import torch
 from .hardware import get_gpu_memory_info
@@ -18,6 +18,10 @@ class ImgRec:
     path: str
     size: int
     mtime: float
+    sha256: Optional[str] = None
+    phash: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 def scan_images(folder: str) -> List[ImgRec]:
@@ -31,7 +35,11 @@ def scan_images(folder: str) -> List[ImgRec]:
     folder_path = Path(folder).resolve()
     print(f"Scanning directory: {folder_path}")
 
-    for root, _, files in os.walk(folder_path):
+    ignored_dirs = {".git", ".imgdedup", "__pycache__", "node_modules"}
+
+    for root, dirs, files in os.walk(folder_path):
+        dirs[:] = [dirname for dirname in dirs if dirname not in ignored_dirs]
+
         for file in files:
             if Path(file).suffix.lower() in supported_exts:
                 full_path = os.path.join(root, file)

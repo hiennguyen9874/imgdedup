@@ -28,15 +28,33 @@ from .filesystem import (
 from .models import (
     ImageDataset,
     collate_fn,
+    load_image_for_embedding,
     extract_clip_features,
     extract_features_on_gpu,
     extract_clip_features_multigpu,
 )
 
+from .cache import (
+    DedupCache,
+    build_feature_matrix,
+)
+
 from .similarity import (
     l2_normalize,
     UnionFind,
-    build_groups_clip,
+)
+
+from .hashing import (
+    compute_sha256,
+    compute_image_metadata,
+    phash_distance,
+)
+
+from .matching import (
+    MatchThresholds,
+    DuplicatePair,
+    decide_pair,
+    find_duplicate_pairs,
 )
 
 from .reporting import (
@@ -65,13 +83,23 @@ __all__ = [
     # Model operations
     "ImageDataset",
     "collate_fn",
+    "load_image_for_embedding",
+    "DedupCache",
+    "build_feature_matrix",
     "extract_clip_features",
     "extract_features_on_gpu",
     "extract_clip_features_multigpu",
     # Similarity and clustering
     "l2_normalize",
     "UnionFind",
-    "build_groups_clip",
+    # Hashing and matching
+    "compute_sha256",
+    "compute_image_metadata",
+    "phash_distance",
+    "MatchThresholds",
+    "DuplicatePair",
+    "decide_pair",
+    "find_duplicate_pairs",
     # Reporting
     "pick_representative",
     "make_report",
