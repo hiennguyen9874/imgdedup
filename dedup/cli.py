@@ -31,7 +31,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "folder", type=str, help="Root folder to scan recursively for images"
+        "folders", nargs="+", help="Root folder(s) to scan recursively for images"
     )
 
     parser.add_argument(
@@ -180,7 +180,7 @@ def parse_args():
         "--report",
         type=str,
         default=None,
-        help="Path to output JSON report. Default: <folder>/dedup_report.json",
+        help="Path to output JSON report. Default: <folder>/dedup_report.json for one folder, ./dedup_report.json for multiple folders.",
     )
 
     parser.add_argument(
@@ -194,10 +194,11 @@ def parse_args():
 
 def validate_args(args):
     """Validate command line arguments"""
-    # Validate folder
-    if not os.path.isdir(args.folder):
-        print(f"Error: {args.folder} is not a valid directory")
-        sys.exit(1)
+    # Validate folders
+    for folder in args.folders:
+        if not os.path.isdir(folder):
+            print(f"Error: {folder} is not a valid directory")
+            sys.exit(1)
 
     # Validate GPU memory fraction
     if not 0.1 <= args.gpu_memory_fraction <= 1.0:
@@ -235,7 +236,10 @@ def validate_args(args):
 
     # Set default report path
     if not args.no_report and args.report is None:
-        args.report = os.path.join(args.folder, "dedup_report.json")
+        report_root = args.folders[0] if len(args.folders) == 1 else os.getcwd()
+        args.report = os.path.join(report_root, "dedup_report.json")
+
+    args.cache_root = args.folders[0] if len(args.folders) == 1 else os.getcwd()
 
 
 def print_config(args):
@@ -243,7 +247,7 @@ def print_config(args):
     print("=" * 60)
     print("Image Deduplication Tool - Multi-GPU CLIP Mode")
     print("=" * 60)
-    print(f"Folder: {args.folder}")
+    print(f"Folders: {', '.join(args.folders)}")
     print(f"Model: {args.model}")
     print(f"Cosine auto threshold: {args.cosine_auto}")
     print(f"Cosine verify threshold: {args.cosine_verify}")
@@ -312,7 +316,9 @@ def main():
     # Step 1: Scan images
     print("[1/6] Scanning for images...")
     started = time.perf_counter()
-    records = scan_images(args.folder)
+    records = []
+    for folder in args.folders:
+        records.extend(scan_images(folder))
     scan_seconds = time.perf_counter() - started
 
     if not records:
@@ -323,7 +329,7 @@ def main():
     print("Step 1 timings:")
     print(f"  scan: {scan_seconds:.2f}s\n")
 
-    cache = DedupCache(args.folder)
+    cache = DedupCache(args.cache_root)
 
     # Step 2: Compute exact and perceptual hashes
     started = time.perf_counter()
@@ -491,7 +497,7 @@ def main():
         action = "hard-deleting" if args.hard_delete else "moving duplicates to trash"
         print(f"\n[6/6] Applying report by {action}...")
         delete_mode = "hard-delete" if args.hard_delete else "move"
-        result = delete_duplicates(report, args.folder, mode=delete_mode)
+        result = delete_duplicates(report, args.folders, mode=delete_mode)
 
         # Print detailed cleanup summary
         print(f"\nCleanup Summary:")

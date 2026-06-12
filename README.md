@@ -72,6 +72,12 @@ Dry run scan:
 uv run python main.py ./photos
 ```
 
+Dry run scan across multiple folders:
+
+```bash
+uv run python main.py ./photos1 ./photos2
+```
+
 This will:
 
 1. scan image files
@@ -85,6 +91,12 @@ Default report path:
 
 ```text
 ./photos/dedup_report.json
+```
+
+When scanning multiple folders, the default report path is:
+
+```text
+./dedup_report.json
 ```
 
 No files are deleted in dry-run mode.
@@ -115,6 +127,8 @@ This moves duplicate files to:
 ```text
 ./photos/.imgdedup/trash/<run_id>/
 ```
+
+When scanning multiple folders, each duplicate is moved to the `.imgdedup/trash/<run_id>/` directory under the scanned root that contains it.
 
 A restore manifest is written to:
 
@@ -154,7 +168,7 @@ uv run python main.py ./photos \
 
 | Option | Default | Meaning |
 | --- | ---: | --- |
-| `folder` | required | Root folder to scan recursively for images |
+| `folders` | required | One or more root folders to scan recursively for images |
 | `--cosine-auto` | `0.97` | Auto duplicate if cosine is at least this value |
 | `--cosine-verify` | `0.90` | Duplicate if cosine is at least this value and pHash distance is low enough |
 | `--cosine-review` | `0.85` | Lower bound for report-only pairs |
@@ -176,7 +190,7 @@ uv run python main.py ./photos \
 | `--inplace` | off | Move duplicates to `.imgdedup/trash/` after building the report |
 | `--hard-delete` | off | Permanently delete duplicates instead of moving them to trash; requires `--yes` |
 | `--yes` | off | Confirm destructive hard-delete mode |
-| `--report` | `<folder>/dedup_report.json` | Output path for the JSON report |
+| `--report` | `<folder>/dedup_report.json` or `./dedup_report.json` for multiple folders | Output path for the JSON report |
 | `--no-report` | off | Build the report summary but skip writing the JSON file |
 
 ## Recommended settings
@@ -295,7 +309,7 @@ It skips common internal folders such as:
 
 ## Caching
 
-Metadata and embeddings are cached inside a `.imgdedup/` directory next to the scanned folder:
+Metadata and embeddings are cached inside a `.imgdedup/` directory next to the scanned folder. When scanning multiple folders, the shared cache is written to `./.imgdedup/`:
 
 | File | Purpose |
 | --- | --- |

@@ -7,7 +7,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Sequence, Union
 from tqdm import tqdm
 
 
@@ -20,11 +20,24 @@ def _iter_duplicate_paths(report: Dict) -> Iterable[str]:
                 yield duplicate
 
 
-def _trash_path(root: str, run_id: str, original_path: str) -> str:
+def _root_for_path(roots: Sequence[str], original_path: str) -> Path:
+    original = Path(original_path).resolve()
+    for root in roots:
+        root_path = Path(root).resolve()
+        try:
+            original.relative_to(root_path)
+            return root_path
+        except ValueError:
+            continue
+    return Path(roots[0]).resolve()
+
+
+def _trash_path(roots: Sequence[str], run_id: str, original_path: str) -> str:
     original = Path(original_path)
-    trash_root = Path(root).resolve() / ".imgdedup" / "trash" / run_id
+    root = _root_for_path(roots, original_path)
+    trash_root = root / ".imgdedup" / "trash" / run_id
     try:
-        relative = original.resolve().relative_to(Path(root).resolve())
+        relative = original.resolve().relative_to(root)
     except ValueError:
         relative = Path(original.name)
 
@@ -42,7 +55,7 @@ def _trash_path(root: str, run_id: str, original_path: str) -> str:
 
 def delete_duplicates(
     report: Dict,
-    root: str,
+    root: Union[str, Sequence[str]],
     mode: str = "move",
     run_id: str = None,
 ) -> Dict:
@@ -57,6 +70,7 @@ def delete_duplicates(
     actions = []
     successfully_processed = 0
     duplicate_paths = list(_iter_duplicate_paths(report))
+    roots = [root] if isinstance(root, str) else list(root)
     run_id = run_id or datetime.now().strftime("run_%Y%m%d_%H%M%S")
 
     with tqdm(total=len(duplicate_paths), desc="Processing duplicates") as pbar:
@@ -68,7 +82,7 @@ def delete_duplicates(
                     os.remove(duplicate_path)
                     successfully_processed += 1
                 else:
-                    destination = _trash_path(root, run_id, duplicate_path)
+                    destination = _trash_path(roots, run_id, duplicate_path)
                     os.makedirs(os.path.dirname(destination), exist_ok=True)
                     shutil.move(duplicate_path, destination)
                     actions.append(
@@ -91,7 +105,7 @@ def delete_duplicates(
 
     manifest_path = None
     if mode != "hard-delete" and actions:
-        manifest_dir = Path(root).resolve() / ".imgdedup" / "trash" / run_id
+        manifest_dir = Path(roots[0]).resolve() / ".imgdedup" / "trash" / run_id
         manifest_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = str(manifest_dir / "restore_manifest.json")
         with open(manifest_path, "w") as file_obj:
