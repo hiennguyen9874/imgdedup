@@ -114,6 +114,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--cross-folder-only",
+        action="store_true",
+        help="Only compare images from different parent folders.",
+    )
+
+    parser.add_argument(
         "--inplace",
         action="store_true",
         help="Move duplicates to .imgdedup/trash immediately (default is dry run)",
@@ -186,6 +192,7 @@ def print_config(args):
     print(f"GPUs to use: {args.gpus if args.gpus is not None else 'all available'}")
     print(f"GPU memory fraction: {args.gpu_memory_fraction}")
     print(f"Keep policy: {args.keep_policy}")
+    print(f"Cross-folder only: {args.cross_folder_only}")
     if args.inplace and args.hard_delete:
         mode = "IN-PLACE HARD DELETE"
     elif args.inplace:
@@ -307,6 +314,7 @@ def main():
         thresholds=thresholds,
         k=args.k,
         faiss_index_path=str(cache.faiss_index_path) if args.save_faiss_index else None,
+        cross_folder_only=args.cross_folder_only,
     )
 
     print(f"Found {len(groups)} duplicate groups")

@@ -83,6 +83,10 @@ def decide_pair(
     return "ignore", "not_confident", "ignored"
 
 
+def _same_parent_folder(records: List[ImgRec], a: int, b: int) -> bool:
+    return os.path.dirname(records[a].path) == os.path.dirname(records[b].path)
+
+
 def _make_pair(
     records: List[ImgRec],
     a: int,
@@ -245,6 +249,7 @@ def find_duplicate_pairs(
     k: int = 50,
     faiss_index_path: Optional[str] = None,
     show_timings: bool = True,
+    cross_folder_only: bool = False,
 ) -> Tuple[List[DuplicatePair], List[DuplicatePair], List[List[int]]]:
     """
     Find duplicate and review-only pairs, then group duplicates.
@@ -257,6 +262,8 @@ def find_duplicate_pairs(
 
     started = time.perf_counter()
     for left, right in _iter_exact_sha_pairs(records):
+        if cross_folder_only and _same_parent_folder(records, left, right):
+            continue
         _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds))
     timings["sha256 pairs"] = time.perf_counter() - started
 
@@ -268,6 +275,8 @@ def find_duplicate_pairs(
 
         started = time.perf_counter()
         for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
+            if cross_folder_only and _same_parent_folder(records, left, right):
+                continue
             left_pos = feature_positions.get(left)
             right_pos = feature_positions.get(right)
             cosine = None
@@ -306,6 +315,10 @@ def find_duplicate_pairs(
                 neighbor_record_idx = valid_indices[neighbor_local_idx]
                 if record_idx > neighbor_record_idx:
                     continue
+                if cross_folder_only and _same_parent_folder(
+                    records, record_idx, neighbor_record_idx
+                ):
+                    continue
 
                 score = float(score)
                 if score < thresholds.cosine_review:
@@ -318,6 +331,8 @@ def find_duplicate_pairs(
     else:
         started = time.perf_counter()
         for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
+            if cross_folder_only and _same_parent_folder(records, left, right):
+                continue
             if phash_dist <= thresholds.phash_auto_distance:
                 _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds, phash_dist))
         timings["pHash BK-tree"] = time.perf_counter() - started

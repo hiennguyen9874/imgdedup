@@ -76,6 +76,15 @@ No files are deleted in dry-run mode.
 uv run python main.py ./photos --report ./dedup_report.json
 ```
 
+## Compare only across folders
+
+Use `--cross-folder-only` when images in the same folder should not be treated as duplicates.
+Only pairs from different immediate parent folders are compared.
+
+```bash
+uv run python main.py ./photos --cross-folder-only
+```
+
 ## Move duplicates to trash
 
 ```bash
@@ -115,6 +124,7 @@ uv run python main.py ./photos \
   --cosine-review 0.85 \
   --phash-auto-distance 4 \
   --phash-verify-distance 8 \
+  --cross-folder-only \
   --k 50
 ```
 
@@ -133,6 +143,7 @@ uv run python main.py ./photos \
 | `--gpus` | all available | Number of GPUs to use for parallel processing |
 | `--gpu-memory-fraction` | `0.9` | GPU memory fraction per device (0.1–1.0) |
 | `--keep-policy` | `highest-resolution` | Which file to keep in each duplicate group |
+| `--cross-folder-only` | off | Only compare images from different immediate parent folders |
 | `--report` | `<folder>/dedup_report.json` | Output path for the JSON report |
 
 ### Keep policies
