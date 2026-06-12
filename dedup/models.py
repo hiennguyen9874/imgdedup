@@ -94,6 +94,7 @@ def extract_clip_features(
     records: List[ImgRec],
     model_name: str = "google/siglip2-base-patch16-naflex",
     batch_size: int = 128,
+    loader_workers: int = 0,
 ) -> Tuple[np.ndarray, List[int]]:
     """
     Extract CLIP features for all images using batched inference.
@@ -145,7 +146,7 @@ def extract_clip_features(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=loader_workers,
         collate_fn=collate_fn,
         pin_memory=(device.type == "cuda"),
     )
@@ -189,6 +190,7 @@ def extract_features_on_gpu(
     batch_size: int = 128,
     gpu_memory_fraction: float = 0.9,
     record_indices: Optional[List[int]] = None,
+    loader_workers: int = 0,
 ) -> Tuple[np.ndarray, List[int]]:
     """
     Extract CLIP features on a specific GPU.
@@ -307,7 +309,7 @@ def extract_features_on_gpu(
         dataset,
         batch_size=optimal_batch_size,
         shuffle=False,
-        num_workers=0,  # As requested to prevent init process issues
+        num_workers=loader_workers,
         collate_fn=collate_fn,
         pin_memory=True,  # Always use pin_memory for faster GPU transfer
     )
@@ -403,6 +405,7 @@ def extract_clip_features_multigpu(
     batch_size: int = 128,
     num_gpus: int = None,
     gpu_memory_fraction: float = 0.9,
+    loader_workers: int = 0,
 ) -> Tuple[np.ndarray, List[int]]:
     """
     Extract CLIP features using multiple GPUs in parallel.
@@ -418,7 +421,7 @@ def extract_clip_features_multigpu(
 
     if not available_gpus:
         print("No GPUs available, falling back to CPU")
-        return extract_clip_features(records, model_name, batch_size)
+        return extract_clip_features(records, model_name, batch_size, loader_workers)
 
     # Determine number of GPUs to use
     if num_gpus is None:
@@ -435,6 +438,7 @@ def extract_clip_features_multigpu(
             batch_size,
             gpu_memory_fraction,
             list(range(len(records))),
+            loader_workers,
         )
 
     print(
@@ -468,6 +472,7 @@ def extract_clip_features_multigpu(
                 batch_size,
                 gpu_memory_fraction,
                 record_indices,
+                loader_workers,
             )
             return gpu_idx, features, indices, None
         except Exception as e:
@@ -533,7 +538,7 @@ def extract_clip_features_multigpu(
     # Check if any GPUs completed successfully
     if not completed_gpus:
         print("All GPUs failed, falling back to CPU")
-        return extract_clip_features(records, model_name, batch_size)
+        return extract_clip_features(records, model_name, batch_size, loader_workers)
 
     # Combine results from all successful GPUs
     if all_features:

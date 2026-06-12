@@ -145,7 +145,9 @@ uv run python main.py ./photos \
   --phash-verify-distance 8 \
   --cross-folder-only \
   --grouping connected \
-  --k 50
+  --k 50 \
+  --metadata-workers 8 \
+  --loader-workers 0
 ```
 
 ## Options
@@ -161,6 +163,8 @@ uv run python main.py ./photos \
 | `--k` | `50` | Number of FAISS nearest neighbors to search |
 | `--save-faiss-index` | off | Save `.imgdedup/faiss.index` after matching; disabled by default for speed |
 | `--batch-size` | `128` | Embedding inference batch size |
+| `--metadata-workers` | `min(32, CPU count)` | Parallel workers for SHA-256 and pHash metadata computation |
+| `--loader-workers` | `0` | PyTorch DataLoader workers for image loading; increase cautiously if GPU waits on image decoding |
 | `--model` | `facebook/dinov3-vitb16-pretrain-lvd1689m` | Hugging Face model for embedding extraction |
 | `--gpus` | all available | Number of GPUs to use for parallel processing |
 | `--gpu-memory-fraction` | `0.9` | GPU memory fraction per device (0.1–1.0) |
@@ -300,7 +304,7 @@ Metadata and embeddings are cached inside a `.imgdedup/` directory next to the s
 | `faiss.index` | Serialized FAISS index for nearest-neighbor search |
 | `trash/<run_id>/` | Moved duplicate files and `restore_manifest.json` |
 
-On subsequent runs, only new or changed files are processed — cached results are reused.
+On subsequent runs, only new or changed files are processed — cached results are reused. During a run, cache metadata is loaded into memory once to avoid repeated SQLite lookups.
 
 ## Architecture notes
 

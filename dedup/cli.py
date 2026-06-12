@@ -3,6 +3,7 @@ Command line interface and main workflow orchestration.
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import sys
@@ -83,6 +84,20 @@ def parse_args():
         type=int,
         default=128,
         help="Batch size for inference. Default: 128",
+    )
+
+    parser.add_argument(
+        "--metadata-workers",
+        type=int,
+        default=min(32, (os.cpu_count() or 1)),
+        help="Parallel workers for sha256 and pHash metadata. Default: min(32, CPU count)",
+    )
+
+    parser.add_argument(
+        "--loader-workers",
+        type=int,
+        default=0,
+        help="PyTorch DataLoader workers for image loading. Default: 0",
     )
 
     parser.add_argument(
@@ -195,6 +210,14 @@ def validate_args(args):
         print("Error: cosine thresholds must satisfy review <= verify <= auto")
         sys.exit(1)
 
+    if args.metadata_workers < 1:
+        print("Error: --metadata-workers must be at least 1")
+        sys.exit(1)
+
+    if args.loader_workers < 0:
+        print("Error: --loader-workers must be 0 or greater")
+        sys.exit(1)
+
     if args.hard_delete and not args.yes:
         print("Error: --hard-delete requires --yes")
         sys.exit(1)
@@ -230,6 +253,8 @@ def print_config(args):
     print(f"Top-k: {args.k}")
     print(f"Save FAISS index: {args.save_faiss_index}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Metadata workers: {args.metadata_workers}")
+    print(f"Loader workers: {args.loader_workers}")
     print(f"GPUs to use: {args.gpus if args.gpus is not None else 'all available'}")
     print(f"GPU memory fraction: {args.gpu_memory_fraction}")
     print(f"Keep policy: {args.keep_policy}")
@@ -255,6 +280,24 @@ def print_config(args):
     print()
 
 
+def _compute_missing_metadata(record):
+    sha256 = record.sha256
+    phash = record.phash
+    width = record.width
+    height = record.height
+
+    if sha256 is None:
+        try:
+            sha256 = compute_sha256(record.path)
+        except OSError as e:
+            print(f"Warning: Could not compute sha256 for {record.path}: {e}")
+
+    if phash is None or width is None or height is None:
+        phash, width, height = compute_image_metadata(record.path)
+
+    return sha256, phash, width, height
+
+
 def main():
     """Main entry point for the CLI"""
     args = parse_args()
@@ -268,47 +311,73 @@ def main():
 
     # Step 1: Scan images
     print("[1/6] Scanning for images...")
+    started = time.perf_counter()
     records = scan_images(args.folder)
+    scan_seconds = time.perf_counter() - started
 
     if not records:
         print("No images found. Exiting.")
         sys.exit(0)
 
-    print(f"Found {len(records)} images\n")
+    print(f"Found {len(records)} images")
+    print("Step 1 timings:")
+    print(f"  scan: {scan_seconds:.2f}s\n")
 
     cache = DedupCache(args.folder)
 
     # Step 2: Compute exact and perceptual hashes
+    started = time.perf_counter()
     cached_metadata = cache.apply_cached_metadata(records)
+    cache_apply_seconds = time.perf_counter() - started
     print(f"[2/6] Computing sha256 and pHash... ({cached_metadata} metadata cache hits)")
-    for record in tqdm(records, desc="Hashing images"):
-        metadata_cached = (
+    records_to_hash = [
+        record
+        for record in records
+        if not (
             record.sha256 is not None
             and record.phash is not None
             and record.width is not None
             and record.height is not None
         )
-        if record.sha256 is None:
-            try:
-                record.sha256 = compute_sha256(record.path)
-            except OSError as e:
-                print(f"Warning: Could not compute sha256 for {record.path}: {e}")
+    ]
 
-        if record.phash is None or record.width is None or record.height is None:
-            try:
-                record.phash, record.width, record.height = compute_image_metadata(record.path)
-            except ImportError as e:
-                print(f"Error: {e}")
-                cache.close()
-                sys.exit(1)
+    hash_started = time.perf_counter()
+    if records_to_hash:
+        worker_count = min(args.metadata_workers, len(records_to_hash))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_to_record = {
+                executor.submit(_compute_missing_metadata, record): record
+                for record in records_to_hash
+            }
+            for future in tqdm(
+                as_completed(future_to_record),
+                total=len(future_to_record),
+                desc="Hashing images",
+            ):
+                record = future_to_record[future]
+                try:
+                    record.sha256, record.phash, record.width, record.height = future.result()
+                    cache.update_metadata(record)
+                except ImportError as e:
+                    print(f"Error: {e}")
+                    cache.close()
+                    sys.exit(1)
+                except OSError as e:
+                    print(f"Warning: Could not compute metadata for {record.path}: {e}")
+    hash_seconds = time.perf_counter() - hash_started
 
-        if not metadata_cached:
-            cache.update_metadata(record)
+    commit_started = time.perf_counter()
     cache.conn.commit()
+    commit_seconds = time.perf_counter() - commit_started
 
+    print("Step 2 timings:")
+    print(f"  cache apply: {cache_apply_seconds:.2f}s")
+    print(f"  metadata compute: {hash_seconds:.2f}s")
+    print(f"  cache commit: {commit_seconds:.2f}s")
     print()
 
     # Step 3: Extract features
+    feature_step_started = time.perf_counter()
     missing_embedding_indices = [
         idx for idx, record in enumerate(records) if cache.get_embedding(record, args.model) is None
     ]
@@ -323,6 +392,7 @@ def main():
             batch_size=args.batch_size,
             num_gpus=args.gpus,
             gpu_memory_fraction=args.gpu_memory_fraction,
+            loader_workers=args.loader_workers,
         )
         extracted_indices = [missing_embedding_indices[idx] for idx in extracted_indices]
     else:
@@ -332,6 +402,7 @@ def main():
     if extracted_features is None:
         extracted_features = np.empty((0, 0), dtype=np.float32)
 
+    matrix_started = time.perf_counter()
     features, valid_indices, embedding_cache_hits = build_feature_matrix(
         cache,
         records,
@@ -339,14 +410,22 @@ def main():
         extracted_features,
         extracted_indices,
     )
+    matrix_seconds = time.perf_counter() - matrix_started
 
     if len(valid_indices) == 0:
         print("No valid images to process. Exiting.")
         cache.close()
         sys.exit(0)
 
+    save_started = time.perf_counter()
     cache.save_embeddings(records, features, valid_indices, args.model)
-    print(f"Extracted/reused features: {features.shape} ({embedding_cache_hits} reused from cache)\n")
+    embedding_save_seconds = time.perf_counter() - save_started
+    feature_step_seconds = time.perf_counter() - feature_step_started
+    print(f"Extracted/reused features: {features.shape} ({embedding_cache_hits} reused from cache)")
+    print("Step 3 timings:")
+    print(f"  feature matrix build: {matrix_seconds:.2f}s")
+    print(f"  embedding cache save: {embedding_save_seconds:.2f}s")
+    print(f"  total: {feature_step_seconds:.2f}s\n")
 
     # Step 4: Build duplicate groups
     print("[4/6] Building duplicate groups with sha256, pHash, and FAISS...")

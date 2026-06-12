@@ -24,6 +24,7 @@ class DedupCache:
         self.faiss_index_path = self.cache_dir / "faiss.index"
         self.conn = sqlite3.connect(self.db_path)
         self._init_schema()
+        self._metadata_by_key = self._load_metadata_index()
         self._existing_embeddings = self._load_existing_embeddings()
 
     def close(self) -> None:
@@ -56,25 +57,31 @@ class DedupCache:
             print(f"Warning: Could not load cached embeddings: {exc}")
             return None
 
-    def get_metadata(self, record: ImgRec) -> Optional[Dict]:
-        row = self.conn.execute(
+    def _load_metadata_index(self) -> Dict[Tuple[str, int, float], Dict]:
+        rows = self.conn.execute(
             """
-            SELECT sha256, phash, width, height, embedding_offset, model_version
+            SELECT path, size, mtime, sha256, phash, width, height,
+                   embedding_offset, model_version
             FROM images
-            WHERE path = ? AND size = ? AND mtime = ?
-            """,
-            (record.path, record.size, record.mtime),
-        ).fetchone()
-        if row is None:
-            return None
+            """
+        ).fetchall()
         return {
-            "sha256": row[0],
-            "phash": row[1],
-            "width": row[2],
-            "height": row[3],
-            "embedding_offset": row[4],
-            "model_version": row[5],
+            (row[0], row[1], row[2]): {
+                "sha256": row[3],
+                "phash": row[4],
+                "width": row[5],
+                "height": row[6],
+                "embedding_offset": row[7],
+                "model_version": row[8],
+            }
+            for row in rows
         }
+
+    def _metadata_key(self, record: ImgRec) -> Tuple[str, int, float]:
+        return (record.path, record.size, record.mtime)
+
+    def get_metadata(self, record: ImgRec) -> Optional[Dict]:
+        return self._metadata_by_key.get(self._metadata_key(record))
 
     def apply_cached_metadata(self, records: List[ImgRec]) -> int:
         hits = 0
@@ -125,6 +132,14 @@ class DedupCache:
                 record.height,
             ),
         )
+        self._metadata_by_key[self._metadata_key(record)] = {
+            "sha256": record.sha256,
+            "phash": record.phash,
+            "width": record.width,
+            "height": record.height,
+            "embedding_offset": None,
+            "model_version": None,
+        }
 
     def save_embeddings(
         self,
@@ -168,6 +183,14 @@ class DedupCache:
                     model_name,
                 ),
             )
+            self._metadata_by_key[self._metadata_key(record)] = {
+                "sha256": record.sha256,
+                "phash": record.phash,
+                "width": record.width,
+                "height": record.height,
+                "embedding_offset": offset,
+                "model_version": model_name,
+            }
         self.conn.commit()
         self._existing_embeddings = self._load_existing_embeddings()
 
