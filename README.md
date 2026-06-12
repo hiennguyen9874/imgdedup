@@ -152,12 +152,14 @@ uv run python main.py ./photos \
 
 | Option | Default | Meaning |
 | --- | ---: | --- |
+| `folder` | required | Root folder to scan recursively for images |
 | `--cosine-auto` | `0.97` | Auto duplicate if cosine is at least this value |
 | `--cosine-verify` | `0.90` | Duplicate if cosine is at least this value and pHash distance is low enough |
 | `--cosine-review` | `0.85` | Lower bound for report-only pairs |
 | `--phash-auto-distance` | `4` | Auto duplicate if pHash distance is at most this value |
 | `--phash-verify-distance` | `8` | Max pHash distance for cosine + pHash verified duplicates |
 | `--k` | `50` | Number of FAISS nearest neighbors to search |
+| `--save-faiss-index` | off | Save `.imgdedup/faiss.index` after matching; disabled by default for speed |
 | `--batch-size` | `128` | Embedding inference batch size |
 | `--model` | `facebook/dinov3-vitb16-pretrain-lvd1689m` | Hugging Face model for embedding extraction |
 | `--gpus` | all available | Number of GPUs to use for parallel processing |
@@ -167,8 +169,39 @@ uv run python main.py ./photos \
 | `--grouping` | `connected` | Group duplicates by connected components or `agglomerative` splitting |
 | `--agglomerative-linkage` | `complete` | Linkage for agglomerative grouping: `complete` or `average` |
 | `--agglomerative-cosine-threshold` | `--cosine-auto` | Cosine threshold used when splitting groups with agglomerative clustering |
+| `--inplace` | off | Move duplicates to `.imgdedup/trash/` after building the report |
+| `--hard-delete` | off | Permanently delete duplicates instead of moving them to trash; requires `--yes` |
+| `--yes` | off | Confirm destructive hard-delete mode |
 | `--report` | `<folder>/dedup_report.json` | Output path for the JSON report |
 | `--no-report` | off | Build the report summary but skip writing the JSON file |
+
+## Recommended settings
+
+### Small datasets
+
+For small collections, keep the default connected grouping and review the report:
+
+```bash
+uv run python main.py ./photos \
+  --grouping connected \
+  --k 50
+```
+
+This is fast, simple, and preserves the most inclusive duplicate groups.
+
+### Large datasets
+
+For larger collections or datasets with many visually similar images, use stricter agglomerative splitting to reduce chained groups:
+
+```bash
+uv run python main.py ./photos \
+  --grouping agglomerative \
+  --agglomerative-linkage complete \
+  --agglomerative-cosine-threshold 0.97 \
+  --k 50
+```
+
+If this splits too aggressively, try `--agglomerative-linkage average`. Increase `--k` only when you expect many near-duplicates per image; larger `--k` increases matching and report size.
 
 ### Keep policies
 

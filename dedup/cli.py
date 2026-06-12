@@ -89,7 +89,7 @@ def parse_args():
         "--model",
         type=str,
         default="facebook/dinov3-vitb16-pretrain-lvd1689m",
-        help="Hugging Face model name. Default: google/siglip2-base-patch16-naflex",
+        help="Hugging Face model name. Default: facebook/dinov3-vitb16-pretrain-lvd1689m",
     )
 
     parser.add_argument(
