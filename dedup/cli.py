@@ -257,7 +257,8 @@ def validate_args(args):
         sys.exit(1)
 
     if (
-        args.agglomerative_cosine_threshold is not None
+        hasattr(args, "agglomerative_cosine_threshold")
+        and args.agglomerative_cosine_threshold is not None
         and not -1.0 <= args.agglomerative_cosine_threshold <= 1.0
     ):
         print("Error: --agglomerative-cosine-threshold must be between -1.0 and 1.0")
