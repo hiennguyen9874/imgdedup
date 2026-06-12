@@ -144,6 +144,12 @@ def parse_args():
         help="Path to output JSON report. Default: <folder>/dedup_report.json",
     )
 
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Do not write a JSON report file.",
+    )
+
     return parser.parse_args()
 
 
@@ -169,8 +175,12 @@ def validate_args(args):
         print("Error: --hard-delete requires --yes")
         sys.exit(1)
 
+    if args.no_report and args.report is not None:
+        print("Error: --no-report cannot be used with --report")
+        sys.exit(1)
+
     # Set default report path
-    if args.report is None:
+    if not args.no_report and args.report is None:
         args.report = os.path.join(args.folder, "dedup_report.json")
 
 
@@ -200,7 +210,7 @@ def print_config(args):
     else:
         mode = "DRY RUN (no deletion)"
     print(f"Mode: {mode}")
-    print(f"Report: {args.report}")
+    print(f"Report: {'disabled' if args.no_report else args.report}")
     print("=" * 60)
     print()
 
@@ -328,11 +338,14 @@ def main():
     report = make_report(records, groups, args.keep_policy, duplicate_pairs, review_pairs)
 
     # Save report
-    os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
-    with open(args.report, "w") as f:
-        json.dump(report, f, indent=2)
+    if args.no_report:
+        print("Report writing disabled.\n")
+    else:
+        os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
+        with open(args.report, "w") as f:
+            json.dump(report, f, indent=2)
 
-    print(f"Report saved to: {args.report}\n")
+        print(f"Report saved to: {args.report}\n")
 
     # Print summary
     print("Summary:")
