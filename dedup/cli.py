@@ -72,6 +72,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--save-faiss-index",
+        action="store_true",
+        help="Save .imgdedup/faiss.index after matching. Disabled by default for speed.",
+    )
+
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=128,
@@ -175,6 +181,7 @@ def print_config(args):
     print(f"pHash auto distance: {args.phash_auto_distance}")
     print(f"pHash verify distance: {args.phash_verify_distance}")
     print(f"Top-k: {args.k}")
+    print(f"Save FAISS index: {args.save_faiss_index}")
     print(f"Batch size: {args.batch_size}")
     print(f"GPUs to use: {args.gpus if args.gpus is not None else 'all available'}")
     print(f"GPU memory fraction: {args.gpu_memory_fraction}")
@@ -299,7 +306,7 @@ def main():
         valid_indices,
         thresholds=thresholds,
         k=args.k,
-        faiss_index_path=str(cache.faiss_index_path),
+        faiss_index_path=str(cache.faiss_index_path) if args.save_faiss_index else None,
     )
 
     print(f"Found {len(groups)} duplicate groups")

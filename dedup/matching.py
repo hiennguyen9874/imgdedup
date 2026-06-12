@@ -3,6 +3,7 @@ Duplicate pair generation and decision policy.
 """
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -243,6 +244,7 @@ def find_duplicate_pairs(
     thresholds: MatchThresholds,
     k: int = 50,
     faiss_index_path: Optional[str] = None,
+    show_timings: bool = True,
 ) -> Tuple[List[DuplicatePair], List[DuplicatePair], List[List[int]]]:
     """
     Find duplicate and review-only pairs, then group duplicates.
@@ -251,14 +253,20 @@ def find_duplicate_pairs(
     cannot be auto-deleted.
     """
     pairs: Dict[Tuple[int, int], DuplicatePair] = {}
+    timings: Dict[str, float] = {}
 
+    started = time.perf_counter()
     for left, right in _iter_exact_sha_pairs(records):
         _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds))
+    timings["sha256 pairs"] = time.perf_counter() - started
 
     if len(valid_indices) > 0 and features.size > 0:
+        started = time.perf_counter()
         feats = l2_normalize(features.astype(np.float32))
         feature_positions = {record_idx: pos for pos, record_idx in enumerate(valid_indices)}
+        timings["feature normalize"] = time.perf_counter() - started
 
+        started = time.perf_counter()
         for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
             left_pos = feature_positions.get(left)
             right_pos = feature_positions.get(right)
@@ -266,21 +274,30 @@ def find_duplicate_pairs(
             if left_pos is not None and right_pos is not None:
                 cosine = float(np.dot(feats[left_pos], feats[right_pos]))
             _upsert_pair(pairs, _make_pair(records, left, right, cosine, thresholds, phash_dist))
+        timings["pHash BK-tree"] = time.perf_counter() - started
 
+        started = time.perf_counter()
         index = _build_faiss_index(feats)
         index.add(feats)
+        timings["FAISS build"] = time.perf_counter() - started
+
         if faiss_index_path:
+            started = time.perf_counter()
             os.makedirs(os.path.dirname(os.path.abspath(faiss_index_path)), exist_ok=True)
             try:
                 index_to_write = faiss.index_gpu_to_cpu(index)
             except Exception:
                 index_to_write = index
             faiss.write_index(index_to_write, faiss_index_path)
+            timings["FAISS write"] = time.perf_counter() - started
 
         k_eff = min(k, len(valid_indices))
         print(f"Searching top-{k_eff} neighbors...")
+        started = time.perf_counter()
         similarities, neighbor_ids = index.search(feats, k_eff)
+        timings["FAISS search"] = time.perf_counter() - started
 
+        started = time.perf_counter()
         for local_idx, record_idx in enumerate(valid_indices):
             for score, neighbor_local_idx in zip(similarities[local_idx], neighbor_ids[local_idx]):
                 if neighbor_local_idx < 0 or neighbor_local_idx == local_idx:
@@ -297,11 +314,15 @@ def find_duplicate_pairs(
                 pair = _make_pair(records, record_idx, neighbor_record_idx, score, thresholds)
                 if pair.decision != "ignore":
                     _upsert_pair(pairs, pair)
+        timings["pair classification"] = time.perf_counter() - started
     else:
+        started = time.perf_counter()
         for left, right, phash_dist in _iter_phash_pairs(records, thresholds.phash_verify_distance):
             if phash_dist <= thresholds.phash_auto_distance:
                 _upsert_pair(pairs, _make_pair(records, left, right, None, thresholds, phash_dist))
+        timings["pHash BK-tree"] = time.perf_counter() - started
 
+    started = time.perf_counter()
     duplicate_pairs = [pair for pair in pairs.values() if pair.decision == "duplicate"]
     review_pairs = [pair for pair in pairs.values() if pair.decision == "review"]
 
@@ -310,4 +331,11 @@ def find_duplicate_pairs(
         uf.union(pair.a, pair.b)
 
     groups = [group for group in uf.get_groups() if len(group) > 1]
+    timings["grouping"] = time.perf_counter() - started
+
+    if show_timings:
+        print("Step 4 timings:")
+        for name, elapsed in timings.items():
+            print(f"  {name}: {elapsed:.2f}s")
+
     return duplicate_pairs, review_pairs, groups
