@@ -8,7 +8,8 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from dedup.exporting import export_records, prepare_output
+from dedup.cache import DedupCache
+from dedup.exporting import export_records, prepare_output, staged_output, validate_output
 from dedup.filesystem import ImgRec
 from dedup.quality import QualityThresholds, measure_quality
 from dedup.selection import select_representatives
@@ -27,6 +28,19 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual(3, len(set(selected)))
                 self.assertEqual(selected, select_representatives(features, 3, method, seed=7))
 
+    def test_selection_is_invariant_to_per_row_magnitude(self):
+        features = np.asarray(
+            [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [-1.0, 1.0], [-1.0, 0.0]],
+            dtype=np.float32,
+        )
+        scaled = features * np.asarray([[100.0], [0.1], [25.0], [3.0], [0.5]])
+        for method in ("kmeans", "farthest", "hybrid"):
+            with self.subTest(method=method):
+                self.assertEqual(
+                    select_representatives(features, 3, method, seed=7),
+                    select_representatives(scaled, 3, method, seed=7),
+                )
+
     def test_quality_rejects_small_solid_image(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "small.jpg"
@@ -41,13 +55,14 @@ class SelectionTests(unittest.TestCase):
             source = root / "nested" / "image.jpg"
             source.parent.mkdir(parents=True)
             Image.new("RGB", (16, 16), "red").save(source)
-            output = prepare_output(str(root), str(Path(directory) / "output"))
+            output = Path(directory) / "output"
             stat = source.stat()
             record = ImgRec(str(source.resolve()), stat.st_size, stat.st_mtime)
 
-            result = export_records([record], str(root), str(output), "copy")
+            with staged_output(str(root), str(output)) as staging:
+                result = export_records([record], str(root), str(staging), "copy")
+                self.assertEqual("exported", result[0]["status"])
 
-            self.assertEqual("exported", result[0]["status"])
             self.assertTrue((output / "images" / "nested" / "image.jpg").is_file())
 
     def test_output_requires_force(self):
@@ -57,7 +72,21 @@ class SelectionTests(unittest.TestCase):
             root.mkdir()
             output.mkdir()
             with self.assertRaises(FileExistsError):
-                prepare_output(str(root), str(output))
+                validate_output(str(root), str(output))
+
+    def test_prepare_output_never_deletes_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "input"
+            output = Path(directory) / "output"
+            root.mkdir()
+            output.mkdir()
+            marker = output / "keep.txt"
+            marker.write_text("keep")
+
+            with self.assertRaises(FileExistsError):
+                prepare_output(str(root), str(output), force=True)
+
+            self.assertEqual("keep", marker.read_text())
 
     def test_output_rejects_symlink_even_with_force(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -68,8 +97,69 @@ class SelectionTests(unittest.TestCase):
             target.mkdir()
             output.symlink_to(target, target_is_directory=True)
             with self.assertRaises(ValueError):
-                prepare_output(str(root), str(output), force=True)
+                validate_output(str(root), str(output), force=True)
             self.assertTrue(target.is_dir())
+
+    def test_output_rejects_overlap_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "input"
+            root.mkdir()
+            with self.assertRaises(ValueError):
+                validate_output(str(root), str(root / "export"), force=True)
+            with self.assertRaises(ValueError):
+                validate_output(str(root), directory, force=True)
+            self.assertTrue(root.is_dir())
+
+    def test_staged_output_preserves_existing_output_until_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "input"
+            output = Path(directory) / "output"
+            root.mkdir()
+            output.mkdir()
+            (output / "old.txt").write_text("old")
+
+            with self.assertRaises(RuntimeError):
+                with staged_output(str(root), str(output), force=True) as staging:
+                    (staging / "new.txt").write_text("new")
+                    raise RuntimeError("processing failed")
+
+            self.assertEqual("old", (output / "old.txt").read_text())
+            self.assertFalse((output / "new.txt").exists())
+
+            with staged_output(str(root), str(output), force=True) as staging:
+                (staging / "new.txt").write_text("new")
+
+            self.assertFalse((output / "old.txt").exists())
+            self.assertEqual("new", (output / "new.txt").read_text())
+
+    def test_embedding_subset_save_invalidates_stale_offsets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = DedupCache(directory)
+            try:
+                records = [
+                    ImgRec(str(Path(directory) / "a.jpg"), 1, 1.0),
+                    ImgRec(str(Path(directory) / "b.jpg"), 1, 1.0),
+                ]
+                cache.save_embeddings(
+                    records,
+                    np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+                    [0, 1],
+                    "model",
+                )
+                cache.save_embeddings(
+                    records,
+                    np.asarray([[0.5, 0.5]], dtype=np.float32),
+                    [1],
+                    "model",
+                )
+
+                self.assertIsNone(cache.get_embedding(records[0], "model"))
+                np.testing.assert_array_equal(
+                    np.asarray([0.5, 0.5], dtype=np.float32),
+                    cache.get_embedding(records[1], "model"),
+                )
+            finally:
+                cache.close()
 
     def test_select_workflow_deduplicates_and_exports_exact_count(self):
         from dedup.cli import run_select
@@ -104,6 +194,7 @@ class SelectionTests(unittest.TestCase):
             report = json.loads((output / "reports" / "selection_report.json").read_text())
             self.assertEqual(2, report["funnel"]["selected"])
             self.assertEqual(1, report["funnel"]["duplicates_removed"])
+            self.assertNotIn(".staging-", json.dumps(report))
             self.assertEqual(2, len(list((output / "images").glob("*.jpg"))))
             self.assertTrue((output / "previews" / "selected.jpg").is_file())
 

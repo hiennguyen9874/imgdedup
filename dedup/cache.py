@@ -150,49 +150,76 @@ class DedupCache:
     ) -> None:
         if features.size == 0:
             return
+        if len(features) != len(valid_indices):
+            raise ValueError("features and valid_indices must have the same length")
+        if any(index < 0 or index >= len(records) for index in valid_indices):
+            raise ValueError("valid_indices contains an out-of-range record index")
 
-        np.save(self.embeddings_path, features.astype(np.float32))
-        for offset, record_idx in enumerate(valid_indices):
-            record = records[record_idx]
-            self.conn.execute(
-                """
-                INSERT INTO images(
-                    path, size, mtime, sha256, phash, width, height,
-                    embedding_offset, model_version
+        temporary_path = self.embeddings_path.with_suffix(".npy.tmp")
+        try:
+            with temporary_path.open("wb") as handle:
+                np.save(handle, features.astype(np.float32))
+
+            # The new file contains only this run's embeddings. Invalidate every
+            # old offset before replacing it so an interrupted save can cause a
+            # cache miss, but can never return another image's embedding.
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE images SET embedding_offset = NULL, model_version = NULL"
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    size = excluded.size,
-                    mtime = excluded.mtime,
-                    sha256 = excluded.sha256,
-                    phash = excluded.phash,
-                    width = excluded.width,
-                    height = excluded.height,
-                    embedding_offset = excluded.embedding_offset,
-                    model_version = excluded.model_version
-                """,
-                (
-                    record.path,
-                    record.size,
-                    record.mtime,
-                    record.sha256,
-                    record.phash,
-                    record.width,
-                    record.height,
-                    offset,
-                    model_name,
-                ),
-            )
-            self._metadata_by_key[self._metadata_key(record)] = {
-                "sha256": record.sha256,
-                "phash": record.phash,
-                "width": record.width,
-                "height": record.height,
-                "embedding_offset": offset,
-                "model_version": model_name,
-            }
-        self.conn.commit()
-        self._existing_embeddings = self._load_existing_embeddings()
+            for cached in self._metadata_by_key.values():
+                cached["embedding_offset"] = None
+                cached["model_version"] = None
+
+            os.replace(temporary_path, self.embeddings_path)
+            self._existing_embeddings = self._load_existing_embeddings()
+
+            saved_metadata = []
+            with self.conn:
+                for offset, record_idx in enumerate(valid_indices):
+                    record = records[record_idx]
+                    self.conn.execute(
+                        """
+                        INSERT INTO images(
+                            path, size, mtime, sha256, phash, width, height,
+                            embedding_offset, model_version
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(path) DO UPDATE SET
+                            size = excluded.size,
+                            mtime = excluded.mtime,
+                            sha256 = excluded.sha256,
+                            phash = excluded.phash,
+                            width = excluded.width,
+                            height = excluded.height,
+                            embedding_offset = excluded.embedding_offset,
+                            model_version = excluded.model_version
+                        """,
+                        (
+                            record.path,
+                            record.size,
+                            record.mtime,
+                            record.sha256,
+                            record.phash,
+                            record.width,
+                            record.height,
+                            offset,
+                            model_name,
+                        ),
+                    )
+                    saved_metadata.append((offset, record))
+
+            for offset, record in saved_metadata:
+                self._metadata_by_key[self._metadata_key(record)] = {
+                    "sha256": record.sha256,
+                    "phash": record.phash,
+                    "width": record.width,
+                    "height": record.height,
+                    "embedding_offset": offset,
+                    "model_version": model_name,
+                }
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
 
 def build_feature_matrix(

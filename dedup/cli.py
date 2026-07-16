@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
@@ -21,7 +22,7 @@ from .matching import MatchThresholds, find_duplicate_pairs, find_matches_to_ref
 from .models import extract_clip_features_multigpu
 from .reporting import make_report, pick_representative
 from .deletion import delete_duplicates
-from .exporting import export_records, prepare_output
+from .exporting import export_records, staged_output, validate_output
 from .preview import make_contact_sheet
 from .quality import QualityThresholds, measure_records
 from .selection import select_representatives
@@ -629,7 +630,7 @@ def run_remove_like(args):
 def run_select(args):
     """Deduplicate, sample, and export an exact-size representative subset."""
     try:
-        output_root = prepare_output(args.folder, args.output, args.force)
+        output_root = validate_output(args.folder, args.output, args.force)
     except (FileExistsError, ValueError, OSError) as exc:
         print(f"Error: {exc}")
         sys.exit(1)
@@ -749,46 +750,56 @@ def run_select(args):
         ]
 
         print(f"[6/7] Exporting with mode '{args.copy_mode}'...")
-        exports = export_records(
-            selected_records, args.folder, str(output_root), args.copy_mode
-        )
-        report = build_selection_report(
-            input_root=os.path.abspath(args.folder),
-            output_root=str(output_root),
-            total_images=len(all_records),
-            eligible_after_quality=len(records),
-            duplicate_groups=len(groups),
-            duplicate_paths=duplicate_paths,
-            quality_rejected=quality_rejected,
-            embedding_failed=embedding_failed,
-            not_selected=not_selected,
-            exports=exports,
-            requested=args.num,
-            method=args.selection_method,
-            seed=args.seed,
-            model=args.model,
-            copy_mode=args.copy_mode,
-        )
-
-        print("[7/7] Writing reports and preview...")
-        report_paths = write_selection_reports(report, str(output_root / "reports"))
-        if args.make_preview:
-            preview_path = output_root / "previews" / "selected.jpg"
-            rendered = make_contact_sheet(
-                selected_records,
-                str(preview_path),
-                columns=args.preview_columns,
-                thumbnail_size=args.preview_size,
+        with staged_output(args.folder, args.output, args.force) as staging_root:
+            exports = export_records(
+                selected_records, args.folder, str(staging_root), args.copy_mode
             )
-            print(f"Preview: {preview_path} ({rendered} images)")
+            for exported_record in exports:
+                staged_path = Path(exported_record["output"])
+                exported_record["output"] = str(
+                    output_root / staged_path.relative_to(staging_root)
+                )
+            report = build_selection_report(
+                input_root=os.path.abspath(args.folder),
+                output_root=str(output_root),
+                total_images=len(all_records),
+                eligible_after_quality=len(records),
+                duplicate_groups=len(groups),
+                duplicate_paths=duplicate_paths,
+                quality_rejected=quality_rejected,
+                embedding_failed=embedding_failed,
+                not_selected=not_selected,
+                exports=exports,
+                requested=args.num,
+                method=args.selection_method,
+                seed=args.seed,
+                model=args.model,
+                copy_mode=args.copy_mode,
+            )
 
-        exported = report["funnel"]["selected"]
-        failed = report["funnel"]["export_failed"]
+            print("[7/7] Writing reports and preview...")
+            report_paths = write_selection_reports(report, str(staging_root / "reports"))
+            if args.make_preview:
+                preview_path = staging_root / "previews" / "selected.jpg"
+                rendered = make_contact_sheet(
+                    selected_records,
+                    str(preview_path),
+                    columns=args.preview_columns,
+                    thumbnail_size=args.preview_size,
+                )
+                print(f"Preview: {output_root / 'previews' / 'selected.jpg'} ({rendered} images)")
+
+            exported = report["funnel"]["selected"]
+            failed = report["funnel"]["export_failed"]
+            if failed:
+                print(f"Selected and exported: {exported}/{args.num}")
+                print(f"Export failures: {failed}")
+                print(f"Report: {report_paths['json']}")
+                sys.exit(1)
+
         print(f"Selected and exported: {exported}/{args.num}")
-        print(f"Export failures: {failed}")
-        print(f"Report: {report_paths['json']}")
-        if failed:
-            sys.exit(1)
+        print("Export failures: 0")
+        print(f"Report: {output_root / 'reports' / 'selection_report.json'}")
     finally:
         cache.close()
 

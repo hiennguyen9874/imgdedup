@@ -68,7 +68,7 @@ from .deletion import (
 
 from .quality import QualityMetrics, QualityThresholds, measure_quality
 from .selection import select_representatives
-from .exporting import export_records, prepare_output
+from .exporting import export_records, prepare_output, staged_output, validate_output
 from .preview import make_contact_sheet
 
 __all__ = [
@@ -115,6 +115,8 @@ __all__ = [
     "select_representatives",
     "export_records",
     "prepare_output",
+    "staged_output",
+    "validate_output",
     "make_contact_sheet",
     # Deletion
     "delete_duplicates",

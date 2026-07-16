@@ -2,30 +2,79 @@
 
 import os
 import shutil
+import tempfile
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, Iterator, List
 
 from .filesystem import ImgRec
 
 
-def prepare_output(input_root: str, output_root: str, force: bool = False) -> Path:
-    """Validate and prepare an output directory without risking the input tree."""
+def validate_output(input_root: str, output_root: str, force: bool = False) -> Path:
+    """Validate an output path without changing its current contents."""
     source = Path(input_root).resolve()
     output = Path(output_root).expanduser().absolute()
     if output.is_symlink():
         raise ValueError(f"refusing to use symlink as output root: {output}")
     resolved_output = output.resolve()
-    if resolved_output == source or resolved_output in source.parents:
-        raise ValueError("output must not be the input directory or one of its parents")
+    if (
+        resolved_output == source
+        or resolved_output in source.parents
+        or source in resolved_output.parents
+    ):
+        raise ValueError("input and output directories must not overlap")
 
     if output.exists():
         if not force:
             raise FileExistsError(f"output already exists: {output}; use --force to replace it")
         if not output.is_dir():
             raise ValueError(f"refusing to replace non-directory output: {output}")
-        shutil.rmtree(output)
+    return output
+
+
+def prepare_output(input_root: str, output_root: str, force: bool = False) -> Path:
+    """Create a new output directory; use staged_output when replacing one."""
+    output = validate_output(input_root, output_root, force)
+    if output.exists():
+        raise FileExistsError(
+            f"refusing to replace output in place: {output}; use staged_output"
+        )
     output.mkdir(parents=True)
     return output
+
+
+@contextmanager
+def staged_output(
+    input_root: str, output_root: str, force: bool = False
+) -> Iterator[Path]:
+    """Build output in staging and replace the destination only on success."""
+    output = validate_output(input_root, output_root, force)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent)
+    )
+    backup = output.parent / f".{output.name}.backup-{uuid.uuid4().hex}"
+
+    try:
+        yield staging
+
+        # Revalidate in case the destination changed while processing.
+        validate_output(input_root, output_root, force)
+        had_existing_output = output.exists()
+        if had_existing_output:
+            output.rename(backup)
+        try:
+            staging.rename(output)
+        except BaseException:
+            if had_existing_output and backup.exists() and not output.exists():
+                backup.rename(output)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def _transfer(source: Path, destination: Path, mode: str) -> None:

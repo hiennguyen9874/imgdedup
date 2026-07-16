@@ -84,11 +84,21 @@ def select_hybrid(
 def select_representatives(
     features: np.ndarray, count: int, method: str = "hybrid", seed: int = 42
 ) -> List[int]:
-    """Select feature-row indices with the requested strategy."""
+    """Select feature-row indices by direction in normalized embedding space."""
+    _validate(features, count)
+    normalized = np.asarray(features, dtype=np.float32)
+    norms = np.linalg.norm(normalized, axis=1, keepdims=True)
+    normalized = np.divide(
+        normalized,
+        norms,
+        out=np.zeros_like(normalized),
+        where=norms > 0,
+    )
+
     if method == "kmeans":
-        return select_kmeans(features, count, seed)
+        return select_kmeans(normalized, count, seed)
     if method == "farthest":
-        return select_farthest(features, count, seed)
+        return select_farthest(normalized, count, seed)
     if method == "hybrid":
-        return select_hybrid(features, count, seed)
+        return select_hybrid(normalized, count, seed)
     raise ValueError(f"Unknown selection method: {method}")
