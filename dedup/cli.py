@@ -27,19 +27,34 @@ from .preview import make_contact_sheet
 from .quality import QualityThresholds, measure_records
 from .selection import select_representatives
 from .selection_reporting import build_selection_report, write_selection_reports
+from .config import ConfigError, apply_config, cli_command, load_config
 
 
-def parse_args():
-    """Parse command line arguments"""
-    if len(sys.argv) > 1 and sys.argv[1] == "select":
+def parse_args(argv=None):
+    """Parse CLI arguments, then apply optional YAML config overrides."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        _config_path, config = load_config(argv)
+    except ConfigError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
+
+    command = config.get("command", "dedup") if config else cli_command(argv)
+    explicit_command = cli_command(argv)
+    if config and explicit_command != "dedup" and explicit_command != command:
+        raise SystemExit(
+            f"Error: config command '{command}' conflicts with CLI command '{explicit_command}'"
+        )
+
+    if command == "select":
         parser = argparse.ArgumentParser(
             description="Deduplicate and export a representative image subset",
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
-        parser.add_argument("command", choices=["select"])
-        parser.add_argument("folder", help="Folder to scan recursively")
-        parser.add_argument("--output", required=True, help="New output directory")
-        parser.add_argument("--num", type=int, required=True, help="Exact number of images to select")
+        parser.add_argument("command", choices=["select"], nargs="?" if config else None)
+        parser.add_argument("folder", nargs="?" if config else None, help="Folder to scan recursively")
+        parser.add_argument("--config", help="YAML config file; its values override CLI options")
+        parser.add_argument("--output", required=not bool(config), help="New output directory")
+        parser.add_argument("--num", type=int, required=not bool(config), help="Exact number of images to select")
         parser.add_argument("--selection-method", choices=["kmeans", "farthest", "hybrid"], default="hybrid")
         parser.add_argument("--copy-mode", choices=["copy", "hardlink", "symlink"], default="copy")
         parser.add_argument("--force", action="store_true", help="Replace an existing output directory")
@@ -73,7 +88,7 @@ def parse_args():
         parser.add_argument("--grouping", choices=["connected", "agglomerative"], default="connected")
         parser.add_argument("--agglomerative-linkage", choices=["complete", "average"], default="complete")
         parser.add_argument("--agglomerative-cosine-threshold", type=float, default=None)
-        args = parser.parse_args()
+        args = apply_config(parser, parser.parse_args(argv), config, "select")
         args.select = True
         args.folders = [args.folder]
         args.cross_folder_only = False
@@ -85,14 +100,15 @@ def parse_args():
         args.no_report = True
         return args
 
-    if len(sys.argv) > 1 and sys.argv[1] == "remove-like":
+    if command == "remove-like":
         parser = argparse.ArgumentParser(
             description="Remove images in a folder that match one input image",
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
-        parser.add_argument("command", choices=["remove-like"])
-        parser.add_argument("folder", help="Folder to scan recursively for images to remove")
-        parser.add_argument("image", help="Reference image to compare against the folder")
+        parser.add_argument("command", choices=["remove-like"], nargs="?" if config else None)
+        parser.add_argument("folder", nargs="?" if config else None, help="Folder to scan recursively for images to remove")
+        parser.add_argument("image", nargs="?" if config else None, help="Reference image to compare against the folder")
+        parser.add_argument("--config", help="YAML config file; its values override CLI options")
         parser.add_argument("--cosine-auto", type=float, default=0.97, help="Auto-duplicate cosine threshold. Default: 0.97")
         parser.add_argument("--cosine-verify", type=float, default=0.90, help="Cosine threshold requiring pHash verification. Default: 0.90")
         parser.add_argument("--cosine-review", type=float, default=0.85, help="Review-only cosine threshold. Default: 0.85")
@@ -109,7 +125,7 @@ def parse_args():
         parser.add_argument("--yes", action="store_true", help="Confirm destructive hard-delete mode.")
         parser.add_argument("--report", type=str, default=None, help="Path to output JSON report. Default: <folder>/remove_like_report.json")
         parser.add_argument("--no-report", action="store_true", help="Do not write a JSON report file.")
-        args = parser.parse_args()
+        args = apply_config(parser, parser.parse_args(argv), config, "remove-like")
         args.remove_like = True
         args.folders = [args.folder]
         return args
@@ -120,7 +136,10 @@ def parse_args():
     )
 
     parser.add_argument(
-        "folders", nargs="+", help="Root folder(s) to scan recursively for images"
+        "folders", nargs="*" if config else "+", help="Root folder(s) to scan recursively for images"
+    )
+    parser.add_argument(
+        "--config", help="YAML config file; its values override CLI options"
     )
 
     parser.add_argument(
@@ -278,11 +297,22 @@ def parse_args():
         help="Do not write a JSON report file.",
     )
 
-    return parser.parse_args()
+    return apply_config(parser, parser.parse_args(argv), config, "dedup")
 
 
 def validate_args(args):
-    """Validate command line arguments"""
+    """Validate merged command line and config arguments."""
+    if not args.folders or any(folder is None for folder in args.folders):
+        print("Error: at least one input folder is required")
+        sys.exit(1)
+    if getattr(args, "select", False):
+        if args.output is None or args.num is None:
+            print("Error: select requires 'output' and 'num'")
+            sys.exit(1)
+    if getattr(args, "remove_like", False) and args.image is None:
+        print("Error: remove-like requires 'image'")
+        sys.exit(1)
+
     # Validate folders
     for folder in args.folders:
         if not os.path.isdir(folder):

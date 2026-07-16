@@ -20,6 +20,30 @@ uv run python main.py --help
 
 Lần chạy đầu có thể mất nhiều thời gian do phải tải model và tạo embedding. Những lần sau sẽ dùng cache cho các file không thay đổi.
 
+## Cấu hình YAML (tùy chọn)
+
+Có thể chạy hoàn toàn bằng file `config.yaml` mẫu ở thư mục gốc:
+
+```bash
+uv run python main.py --config config.yaml
+```
+
+File mẫu giải thích chi tiết mọi key và có cấu hình tham khảo cho cả ba workflow `dedup`, `remove-like` và `select`. Tên key dùng dạng `snake_case`, ví dụ `--batch-size` tương ứng `batch_size`. Các đường dẫn tương đối được tính từ thư mục hiện tại khi chạy lệnh.
+
+Thứ tự ưu tiên là:
+
+```text
+mặc định chương trình < tùy chọn CLI < giá trị trong config.yaml
+```
+
+Vì vậy config luôn ghi đè CLI. Ví dụ sau vẫn dùng batch size `64` nếu file config có `batch_size: 64`:
+
+```bash
+uv run python main.py ./photos --batch-size 128 --config config.yaml
+```
+
+Có thể dùng file khác bằng `--config ./path/to/my-config.yaml`. Key không tồn tại, sai kiểu, sai lựa chọn hoặc thuộc workflow khác sẽ dừng với thông báo lỗi thay vì bị bỏ qua âm thầm.
+
 ## Cách dùng cơ bản
 
 Quét một thư mục và tìm ảnh trùng:

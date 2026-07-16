@@ -1,0 +1,116 @@
+# CẤU HÌNH MẪU CHO IMGDEDUP
+# Chạy chỉ bằng file này:
+#   uv run python main.py --config config.yaml
+#
+# Thứ tự ưu tiên: mặc định của chương trình < CLI < file config.
+# Nghĩa là giá trị trong file này LUÔN ghi đè giá trị truyền trên CLI.
+# Ví dụ `batch_size: 64` bên dưới sẽ thắng cả khi CLI có `--batch-size 128`.
+# Tên option trong YAML dùng snake_case: `--cross-folder-only` -> `cross_folder_only`.
+# Đường dẫn tương đối được tính từ thư mục hiện tại nơi chạy lệnh.
+# Xóa hoặc thêm dấu # trước một dòng để dùng giá trị mặc định của chương trình.
+
+# Workflow: dedup | remove-like | select
+command: dedup
+
+# Một hoặc nhiều thư mục ảnh. Với command=dedup, phải dùng YAML list.
+folders:
+  - ./images/examples1
+  # - ./images/examples2
+
+# --- Ngưỡng nhận diện ---
+# Phải thỏa cosine_review <= cosine_verify <= cosine_auto.
+cosine_auto: 0.97       # Tự động coi là trùng khi cosine >= giá trị này.
+cosine_verify: 0.90     # Từ mức này cần pHash xác minh thêm.
+cosine_review: 0.85     # Từ mức này chỉ đưa vào review_only.
+phash_auto_distance: 4  # Tự động trùng nếu khoảng cách pHash <= giá trị này.
+phash_verify_distance: 8 # pHash tối đa khi xác minh cosine_verify.
+k: 50                   # Số láng giềng gần nhất; tăng nếu có nhiều bản gần trùng.
+
+# --- Model và tài nguyên ---
+model: facebook/dinov3-vitb16-pretrain-lvd1689m
+batch_size: 128          # Giảm nếu GPU hết bộ nhớ.
+metadata_workers: 4      # Số worker tính SHA-256/pHash; phải >= 1.
+loader_workers: 0        # Worker nạp ảnh PyTorch; phải >= 0.
+gpus: null               # null = mọi GPU khả dụng/CPU fallback; hoặc số nguyên, ví dụ 1.
+gpu_memory_fraction: 0.9 # Từ 0.1 đến 1.0.
+save_faiss_index: false  # true để lưu .imgdedup/faiss.index.
+
+# --- Gom nhóm và chọn ảnh giữ lại ---
+# keep_policy: highest-resolution | best-quality | largest | smallest |
+#              newest | oldest | lexi
+keep_policy: highest-resolution
+cross_folder_only: false # true = chỉ so sánh ảnh khác thư mục cha trực tiếp.
+# grouping: connected | agglomerative
+grouping: connected
+# Chỉ có hiệu lực khi grouping=agglomerative.
+agglomerative_linkage: complete # complete | average
+agglomerative_cosine_threshold: null # null = dùng cosine_auto; hoặc số từ -1.0 đến 1.0.
+
+# --- Báo cáo và thay đổi file ---
+inplace: false     # false = dry run; true = chuyển ảnh trùng vào trash.
+hard_delete: false # true = xóa vĩnh viễn; chỉ hợp lệ cùng yes: true.
+yes: false         # Xác nhận hard_delete.
+report: null       # null = đường dẫn mặc định; hoặc ví dụ ./reports/dedup.json.
+no_report: false   # true = không ghi báo cáo; không dùng cùng report có đường dẫn.
+
+# -----------------------------------------------------------------------------
+# REMOVE-LIKE: thay phần cấu hình đang hoạt động phía trên bằng mẫu sau.
+# Chỉ dùng các key trong mẫu này; key của workflow khác sẽ bị báo lỗi.
+#
+# command: remove-like
+# folder: ./photos
+# image: ./reference.jpg
+# cosine_auto: 0.97
+# cosine_verify: 0.90
+# cosine_review: 0.85
+# phash_auto_distance: 4
+# phash_verify_distance: 8
+# batch_size: 128
+# metadata_workers: 4
+# loader_workers: 0
+# model: facebook/dinov3-vitb16-pretrain-lvd1689m
+# gpus: null
+# gpu_memory_fraction: 0.9
+# inplace: false
+# hard_delete: false
+# yes: false
+# report: null
+# no_report: false
+
+# -----------------------------------------------------------------------------
+# SELECT: thay phần cấu hình đang hoạt động phía trên bằng mẫu sau.
+# `folder`, `output` và `num` là bắt buộc.
+#
+# command: select
+# folder: ./photos
+# output: ./selected-dataset
+# num: 200
+# selection_method: hybrid # hybrid | kmeans | farthest
+# copy_mode: copy          # copy | hardlink | symlink
+# force: false
+# seed: 42
+# make_preview: false
+# preview_columns: 8
+# preview_size: 192
+# reject_low_quality: false
+# min_width: 224
+# min_height: 224
+# min_blur_score: 20.0
+# min_brightness: 15.0
+# max_brightness: 240.0
+# keep_policy: best-quality
+# cosine_auto: 0.97
+# cosine_verify: 0.90
+# cosine_review: 0.85
+# phash_auto_distance: 4
+# phash_verify_distance: 8
+# k: 50
+# batch_size: 128
+# metadata_workers: 4
+# loader_workers: 0
+# model: facebook/dinov3-vitb16-pretrain-lvd1689m
+# gpus: null
+# gpu_memory_fraction: 0.9
+# grouping: connected
+# agglomerative_linkage: complete
+# agglomerative_cosine_threshold: null
