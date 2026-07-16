@@ -19,12 +19,71 @@ from .filesystem import ImgRec, scan_images
 from .hashing import compute_image_metadata, compute_sha256
 from .matching import MatchThresholds, find_duplicate_pairs, find_matches_to_reference
 from .models import extract_clip_features_multigpu
-from .reporting import make_report
+from .reporting import make_report, pick_representative
 from .deletion import delete_duplicates
+from .exporting import export_records, prepare_output
+from .preview import make_contact_sheet
+from .quality import QualityThresholds, measure_records
+from .selection import select_representatives
+from .selection_reporting import build_selection_report, write_selection_reports
 
 
 def parse_args():
     """Parse command line arguments"""
+    if len(sys.argv) > 1 and sys.argv[1] == "select":
+        parser = argparse.ArgumentParser(
+            description="Deduplicate and export a representative image subset",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument("command", choices=["select"])
+        parser.add_argument("folder", help="Folder to scan recursively")
+        parser.add_argument("--output", required=True, help="New output directory")
+        parser.add_argument("--num", type=int, required=True, help="Exact number of images to select")
+        parser.add_argument("--selection-method", choices=["kmeans", "farthest", "hybrid"], default="hybrid")
+        parser.add_argument("--copy-mode", choices=["copy", "hardlink", "symlink"], default="copy")
+        parser.add_argument("--force", action="store_true", help="Replace an existing output directory")
+        parser.add_argument("--seed", type=int, default=42)
+        parser.add_argument("--make-preview", action="store_true")
+        parser.add_argument("--preview-columns", type=int, default=8)
+        parser.add_argument("--preview-size", type=int, default=192)
+        parser.add_argument("--reject-low-quality", action="store_true")
+        parser.add_argument("--min-width", type=int, default=224)
+        parser.add_argument("--min-height", type=int, default=224)
+        parser.add_argument("--min-blur-score", type=float, default=20.0)
+        parser.add_argument("--min-brightness", type=float, default=15.0)
+        parser.add_argument("--max-brightness", type=float, default=240.0)
+        parser.add_argument(
+            "--keep-policy",
+            choices=["lexi", "smallest", "largest", "highest-resolution", "newest", "oldest", "best-quality"],
+            default="best-quality",
+        )
+        parser.add_argument("--cosine-auto", type=float, default=0.97)
+        parser.add_argument("--cosine-verify", type=float, default=0.90)
+        parser.add_argument("--cosine-review", type=float, default=0.85)
+        parser.add_argument("--phash-auto-distance", type=int, default=4)
+        parser.add_argument("--phash-verify-distance", type=int, default=8)
+        parser.add_argument("--k", type=int, default=50)
+        parser.add_argument("--batch-size", type=int, default=128)
+        parser.add_argument("--metadata-workers", type=int, default=min(32, (os.cpu_count() or 1)))
+        parser.add_argument("--loader-workers", type=int, default=0)
+        parser.add_argument("--model", default="facebook/dinov3-vitb16-pretrain-lvd1689m")
+        parser.add_argument("--gpus", type=int, default=None)
+        parser.add_argument("--gpu-memory-fraction", type=float, default=0.9)
+        parser.add_argument("--grouping", choices=["connected", "agglomerative"], default="connected")
+        parser.add_argument("--agglomerative-linkage", choices=["complete", "average"], default="complete")
+        parser.add_argument("--agglomerative-cosine-threshold", type=float, default=None)
+        args = parser.parse_args()
+        args.select = True
+        args.folders = [args.folder]
+        args.cross_folder_only = False
+        args.save_faiss_index = False
+        args.inplace = False
+        args.hard_delete = False
+        args.yes = False
+        args.report = None
+        args.no_report = True
+        return args
+
     if len(sys.argv) > 1 and sys.argv[1] == "remove-like":
         parser = argparse.ArgumentParser(
             description="Remove images in a folder that match one input image",
@@ -153,7 +212,7 @@ def parse_args():
     parser.add_argument(
         "--keep-policy",
         type=str,
-        choices=["lexi", "smallest", "largest", "highest-resolution", "newest", "oldest"],
+        choices=["lexi", "smallest", "largest", "highest-resolution", "newest", "oldest", "best-quality"],
         default="highest-resolution",
         help="Policy for selecting which file to keep. Default: highest-resolution",
     )
@@ -232,6 +291,20 @@ def validate_args(args):
     if getattr(args, "remove_like", False) and not os.path.isfile(args.image):
         print(f"Error: {args.image} is not a valid file")
         sys.exit(1)
+
+    if getattr(args, "select", False):
+        if args.num < 1:
+            print("Error: --num must be at least 1")
+            sys.exit(1)
+        if args.min_width < 1 or args.min_height < 1:
+            print("Error: quality dimensions must be at least 1")
+            sys.exit(1)
+        if not 0 <= args.min_brightness <= args.max_brightness <= 255:
+            print("Error: brightness thresholds must satisfy 0 <= min <= max <= 255")
+            sys.exit(1)
+        if args.preview_columns < 1 or args.preview_size < 32:
+            print("Error: preview columns must be positive and preview size at least 32")
+            sys.exit(1)
 
     # Validate GPU memory fraction
     if not 0.1 <= args.gpu_memory_fraction <= 1.0:
@@ -553,10 +626,181 @@ def run_remove_like(args):
     print("\nDone.")
 
 
+def run_select(args):
+    """Deduplicate, sample, and export an exact-size representative subset."""
+    try:
+        output_root = prepare_output(args.folder, args.output, args.force)
+    except (FileExistsError, ValueError, OSError) as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("Representative Image Selection")
+    print("=" * 60)
+    print(f"Folder: {args.folder}")
+    print(f"Output: {output_root}")
+    print(f"Requested images: {args.num}")
+    print(f"Selection method: {args.selection_method} (seed {args.seed})")
+    print(f"Quality rejection: {'enabled' if args.reject_low_quality else 'disabled'}")
+    print("=" * 60)
+
+    all_records = scan_images(args.folder)
+    if not all_records:
+        print("No images found. Exiting.")
+        sys.exit(0)
+    print(f"[1/7] Found {len(all_records)} images")
+
+    print("[2/7] Measuring image quality...")
+    quality_thresholds = QualityThresholds(
+        min_width=args.min_width,
+        min_height=args.min_height,
+        min_blur_score=args.min_blur_score,
+        min_brightness=args.min_brightness,
+        max_brightness=args.max_brightness,
+    )
+    quality_metrics = measure_records(
+        all_records, quality_thresholds if args.reject_low_quality else None
+    )
+    quality_rejected = {
+        path: metrics
+        for path, metrics in quality_metrics.items()
+        if args.reject_low_quality and metrics.rejection_reason is not None
+    }
+    records = [record for record in all_records if record.path not in quality_rejected]
+    print(f"Quality rejected: {len(quality_rejected)}")
+    if not records:
+        print("Error: no images remain after quality filtering")
+        sys.exit(1)
+
+    cache = DedupCache(args.cache_root)
+    try:
+        print("[3/7] Preparing hashes and embeddings...")
+        features, valid_indices = _prepare_records(records, args, cache)
+        if not valid_indices:
+            print("Error: no valid image embeddings available")
+            sys.exit(1)
+
+        print("[4/7] Removing duplicate candidates...")
+        thresholds = MatchThresholds(
+            cosine_auto=args.cosine_auto,
+            cosine_verify=args.cosine_verify,
+            cosine_review=args.cosine_review,
+            phash_auto_distance=args.phash_auto_distance,
+            phash_verify_distance=args.phash_verify_distance,
+        )
+        duplicate_pairs, review_pairs, groups = find_duplicate_pairs(
+            records,
+            features,
+            valid_indices,
+            thresholds=thresholds,
+            k=args.k,
+            show_progress=True,
+            grouping_method=args.grouping,
+            agglomerative_linkage=args.agglomerative_linkage,
+            agglomerative_cosine_threshold=args.agglomerative_cosine_threshold,
+        )
+
+        valid_set = set(valid_indices)
+        candidate_indices = set(valid_indices)
+        duplicate_paths = set()
+        for group in groups:
+            valid_group = [idx for idx in group if idx in valid_set]
+            if not valid_group:
+                continue
+            representative = pick_representative(
+                valid_group, records, args.keep_policy, quality_metrics
+            )
+            candidate_indices.difference_update(group)
+            candidate_indices.add(representative)
+            duplicate_paths.update(records[idx].path for idx in group if idx != representative)
+
+        ordered_candidates = sorted(candidate_indices, key=lambda idx: records[idx].path)
+        if args.num > len(ordered_candidates):
+            print(
+                f"Error: requested {args.num} images, but only {len(ordered_candidates)} "
+                "valid unique images remain"
+            )
+            sys.exit(1)
+
+        feature_row_by_record = {
+            record_idx: row_idx for row_idx, record_idx in enumerate(valid_indices)
+        }
+        candidate_features = np.asarray(
+            [features[feature_row_by_record[idx]] for idx in ordered_candidates],
+            dtype=np.float32,
+        )
+
+        print(f"[5/7] Selecting {args.num} of {len(ordered_candidates)} unique images...")
+        selected_rows = select_representatives(
+            candidate_features, args.num, args.selection_method, args.seed
+        )
+        selected_indices = [ordered_candidates[row] for row in selected_rows]
+        selected_records = [records[idx] for idx in selected_indices]
+        selected_paths = {record.path for record in selected_records}
+        not_selected = [
+            records[idx].path
+            for idx in ordered_candidates
+            if records[idx].path not in selected_paths
+        ]
+        embedding_failed = [
+            record.path
+            for idx, record in enumerate(records)
+            if idx not in valid_set and record.path not in duplicate_paths
+        ]
+
+        print(f"[6/7] Exporting with mode '{args.copy_mode}'...")
+        exports = export_records(
+            selected_records, args.folder, str(output_root), args.copy_mode
+        )
+        report = build_selection_report(
+            input_root=os.path.abspath(args.folder),
+            output_root=str(output_root),
+            total_images=len(all_records),
+            eligible_after_quality=len(records),
+            duplicate_groups=len(groups),
+            duplicate_paths=duplicate_paths,
+            quality_rejected=quality_rejected,
+            embedding_failed=embedding_failed,
+            not_selected=not_selected,
+            exports=exports,
+            requested=args.num,
+            method=args.selection_method,
+            seed=args.seed,
+            model=args.model,
+            copy_mode=args.copy_mode,
+        )
+
+        print("[7/7] Writing reports and preview...")
+        report_paths = write_selection_reports(report, str(output_root / "reports"))
+        if args.make_preview:
+            preview_path = output_root / "previews" / "selected.jpg"
+            rendered = make_contact_sheet(
+                selected_records,
+                str(preview_path),
+                columns=args.preview_columns,
+                thumbnail_size=args.preview_size,
+            )
+            print(f"Preview: {preview_path} ({rendered} images)")
+
+        exported = report["funnel"]["selected"]
+        failed = report["funnel"]["export_failed"]
+        print(f"Selected and exported: {exported}/{args.num}")
+        print(f"Export failures: {failed}")
+        print(f"Report: {report_paths['json']}")
+        if failed:
+            sys.exit(1)
+    finally:
+        cache.close()
+
+
 def main():
     """Main entry point for the CLI"""
     args = parse_args()
     validate_args(args)
+
+    if getattr(args, "select", False):
+        run_select(args)
+        return
 
     if getattr(args, "remove_like", False):
         run_remove_like(args)
@@ -719,8 +963,19 @@ def main():
 
     # Step 5: Generate report
     print("[5/6] Generating report...")
+    quality_metrics = None
+    if args.keep_policy == "best-quality":
+        print("Measuring quality for best-quality representative selection...")
+        quality_metrics = measure_records(records)
     started = time.perf_counter()
-    report = make_report(records, groups, args.keep_policy, duplicate_pairs, review_pairs)
+    report = make_report(
+        records,
+        groups,
+        args.keep_policy,
+        duplicate_pairs,
+        review_pairs,
+        quality_metrics,
+    )
     report_build_seconds = time.perf_counter() - started
 
     # Save report

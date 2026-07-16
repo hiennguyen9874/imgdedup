@@ -8,6 +8,7 @@ from collections import defaultdict
 
 from .filesystem import ImgRec
 from .matching import DuplicatePair
+from .quality import QualityMetrics, quality_sort_key
 
 
 def _pixel_count(record: ImgRec) -> int:
@@ -16,7 +17,12 @@ def _pixel_count(record: ImgRec) -> int:
     return record.width * record.height
 
 
-def pick_representative(group: List[int], records: List[ImgRec], policy: str) -> int:
+def pick_representative(
+    group: List[int],
+    records: List[ImgRec],
+    policy: str,
+    quality_metrics: Optional[Dict[str, QualityMetrics]] = None,
+) -> int:
     """
     Select which file to keep from a duplicate group based on policy.
     Returns the index of the file to keep.
@@ -33,6 +39,12 @@ def pick_representative(group: List[int], records: List[ImgRec], policy: str) ->
         return max(group, key=lambda i: records[i].mtime)
     elif policy == "oldest":
         return min(group, key=lambda i: records[i].mtime)
+    elif policy == "best-quality":
+        quality_metrics = quality_metrics or {}
+        return max(
+            group,
+            key=lambda i: quality_sort_key(records[i], quality_metrics.get(records[i].path)),
+        )
     else:
         raise ValueError(f"Unknown keep policy: {policy}")
 
@@ -89,6 +101,7 @@ def make_report(
     keep_policy: str,
     duplicate_pairs: Optional[List[DuplicatePair]] = None,
     review_pairs: Optional[List[DuplicatePair]] = None,
+    quality_metrics: Optional[Dict[str, QualityMetrics]] = None,
 ) -> Dict:
     """
     Generate JSON report with duplicate groups, decisions, and review-only pairs.
@@ -100,7 +113,7 @@ def make_report(
     pair_by_key, pairs_by_image = _build_pair_indexes(duplicate_pairs)
 
     for group in groups:
-        rep_idx = pick_representative(group, records, keep_policy)
+        rep_idx = pick_representative(group, records, keep_policy, quality_metrics)
         duplicates = []
 
         for idx in group:
@@ -108,19 +121,23 @@ def make_report(
                 continue
 
             pair = _best_pair_for_duplicate(rep_idx, idx, pair_by_key, pairs_by_image)
-            duplicates.append(
-                {
-                    "path": records[idx].path,
-                    "reason": pair.reason if pair else "grouped_duplicate",
-                    "cosine": pair.cosine if pair else None,
-                    "phash_distance": pair.phash_distance if pair else None,
-                    "same_sha256": pair.same_sha256 if pair else False,
-                    "confidence": pair.confidence if pair else "grouped",
-                }
-            )
+            duplicate = {
+                "path": records[idx].path,
+                "reason": pair.reason if pair else "grouped_duplicate",
+                "cosine": pair.cosine if pair else None,
+                "phash_distance": pair.phash_distance if pair else None,
+                "same_sha256": pair.same_sha256 if pair else False,
+                "confidence": pair.confidence if pair else "grouped",
+            }
+            if quality_metrics is not None and records[idx].path in quality_metrics:
+                duplicate["quality"] = quality_metrics[records[idx].path].to_dict()
+            duplicates.append(duplicate)
 
         total_duplicates += len(duplicates)
-        report_groups.append({"keep": records[rep_idx].path, "duplicates": duplicates})
+        report_group = {"keep": records[rep_idx].path, "duplicates": duplicates}
+        if quality_metrics is not None and records[rep_idx].path in quality_metrics:
+            report_group["keep_quality"] = quality_metrics[records[rep_idx].path].to_dict()
+        report_groups.append(report_group)
 
     report = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

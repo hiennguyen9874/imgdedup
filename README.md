@@ -101,6 +101,38 @@ When scanning multiple folders, the default report path is:
 
 No files are deleted in dry-run mode.
 
+## Select a representative subset
+
+Use `select` to deduplicate a folder, choose exactly `M` diverse images from the remaining representatives, and export them without changing the source:
+
+```bash
+uv run python main.py select ./photos \
+  --output ./selected-dataset \
+  --num 200 \
+  --selection-method hybrid \
+  --make-preview
+```
+
+Selection methods are `kmeans` (typical examples), `farthest` (maximum coverage), and `hybrid` (centroid candidates followed by coverage selection). Runs are reproducible with `--seed`.
+
+The output contains the mirrored image tree under `images/`, JSON/CSV/text reports under `reports/`, and an optional contact sheet under `previews/`. Existing output directories are rejected unless `--force` is supplied. Export mode defaults to `copy` and can be changed with `--copy-mode hardlink` or `--copy-mode symlink`.
+
+Quality metrics are always used by the default `best-quality` duplicate representative policy. Quality-based rejection is opt-in:
+
+```bash
+uv run python main.py select ./photos \
+  --output ./selected-dataset \
+  --num 200 \
+  --reject-low-quality \
+  --min-width 640 \
+  --min-height 480 \
+  --min-blur-score 20 \
+  --min-brightness 15 \
+  --max-brightness 240
+```
+
+The blur score is edge variance computed with Pillow, so thresholds from OpenCV-based tools are not directly interchangeable. If fewer than `M` valid unique images remain, selection fails rather than silently exporting fewer images.
+
 ## Remove images matching one input image
 
 Use `remove-like` when you have one reference image and want to remove matching images from a folder. The reference image is kept; only matching images inside the scanned folder are reported or removed.
@@ -270,6 +302,7 @@ largest             — largest file size
 highest-resolution  — most pixels (width × height); tie-break by file size
 newest              — most recent modification time
 oldest              — oldest modification time
+best-quality         — sharpness, balanced brightness, resolution, then file size
 ```
 
 Example:

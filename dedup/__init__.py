@@ -66,6 +66,11 @@ from .deletion import (
     delete_duplicates,
 )
 
+from .quality import QualityMetrics, QualityThresholds, measure_quality
+from .selection import select_representatives
+from .exporting import export_records, prepare_output
+from .preview import make_contact_sheet
+
 __all__ = [
     # Hardware detection
     "check_flash_attention_available",
@@ -103,6 +108,14 @@ __all__ = [
     # Reporting
     "pick_representative",
     "make_report",
+    # Selection and export
+    "QualityMetrics",
+    "QualityThresholds",
+    "measure_quality",
+    "select_representatives",
+    "export_records",
+    "prepare_output",
+    "make_contact_sheet",
     # Deletion
     "delete_duplicates",
 ]
