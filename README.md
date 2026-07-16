@@ -1,45 +1,130 @@
 # imgdedup
 
-Local CLI tool for finding duplicate images using exact hash, perceptual hash, and image embeddings.
+CLI chạy hoàn toàn trên máy local để:
 
-The tool is accuracy-focused and safe by default:
+- tìm ảnh trùng bằng SHA-256, pHash và embedding hình ảnh;
+- xem báo cáo trước khi xóa;
+- chuyển ảnh trùng vào thùng rác có manifest khôi phục;
+- chọn một tập ảnh đại diện có kích thước chính xác.
 
-- no API server
-- no database server required
-- dry-run by default
-- review report before deleting
-- `--inplace` moves duplicates to trash, not hard delete
-- hard delete requires explicit `--hard-delete --yes`
+> **An toàn mặc định:** nếu không truyền `--inplace`, công cụ chỉ quét và tạo báo cáo, không thay đổi ảnh nguồn.
 
-## Duplicate rules
+## Cài đặt
 
-A pair is treated as an auto duplicate when any rule matches:
+Yêu cầu Python `>=3.10,<3.11` và [uv](https://docs.astral.sh/uv/).
 
-| Rule | Condition |
+```bash
+uv sync
+uv run python main.py --help
+```
+
+Lần chạy đầu có thể mất nhiều thời gian do phải tải model và tạo embedding. Những lần sau sẽ dùng cache cho các file không thay đổi.
+
+## Cách dùng cơ bản
+
+Quét một thư mục và tìm ảnh trùng:
+
+```bash
+uv run python main.py ./photos
+```
+
+Lệnh trên sẽ:
+
+1. quét đệ quy các ảnh trong `./photos`;
+2. tính SHA-256, pHash và embedding;
+3. gom các ảnh trùng thành nhóm;
+4. chọn ảnh có độ phân giải cao nhất để giữ lại;
+5. ghi kết quả vào `./photos/dedup_report.json`.
+
+Không có ảnh nào bị di chuyển hoặc xóa. Hãy mở `dedup_report.json` và kiểm tra hai phần:
+
+- `groups`: các nhóm ảnh trùng; `keep` là ảnh được giữ, `duplicates` là các ảnh có thể loại bỏ;
+- `review_only`: các cặp chỉ nên kiểm tra thủ công, **không bao giờ được tự động xóa**.
+
+## Các trường hợp sử dụng
+
+<details>
+<summary><strong>Quét nhiều thư mục</strong></summary>
+
+```bash
+uv run python main.py ./photos-2024 ./photos-2025
+```
+
+Ảnh ở tất cả thư mục được xét chung. Khi có nhiều thư mục:
+
+- báo cáo mặc định là `./dedup_report.json` trong thư mục hiện tại;
+- cache dùng chung nằm tại `./.imgdedup/`;
+- nếu chuyển vào thùng rác, mỗi file được chuyển vào `.imgdedup/trash/` thuộc thư mục nguồn chứa nó.
+
+</details>
+
+<details>
+<summary><strong>Chỉ so sánh ảnh giữa các thư mục</strong></summary>
+
+Dùng khi các ảnh trong cùng một thư mục không được coi là trùng nhau:
+
+```bash
+uv run python main.py ./photos --cross-folder-only
+```
+
+Công cụ chỉ so sánh hai ảnh khi **thư mục cha trực tiếp** của chúng khác nhau.
+
+</details>
+
+<details>
+<summary><strong>Đổi nơi lưu hoặc tắt báo cáo</strong></summary>
+
+Chọn đường dẫn báo cáo:
+
+```bash
+uv run python main.py ./photos --report ./reports/dedup.json
+```
+
+Không ghi file JSON:
+
+```bash
+uv run python main.py ./photos --no-report
+```
+
+Không thể dùng đồng thời `--report` và `--no-report`.
+
+</details>
+
+<details>
+<summary><strong>Chọn ảnh được giữ lại trong mỗi nhóm</strong></summary>
+
+Mặc định công cụ giữ ảnh có độ phân giải cao nhất:
+
+```bash
+uv run python main.py ./photos --keep-policy highest-resolution
+```
+
+Các chính sách hỗ trợ:
+
+| Giá trị | Ảnh được giữ |
 | --- | --- |
-| Same SHA-256 | `sha256` are identical |
-| pHash auto | Hamming distance ≤ `--phash-auto-distance` (default 4) |
-| Cosine auto | Cosine similarity ≥ `--cosine-auto` (default 0.97) |
-| Cosine + pHash verify | Cosine ≥ `--cosine-verify` (default 0.90) **and** pHash distance ≤ `--phash-verify-distance` (default 8) |
+| `highest-resolution` | Nhiều pixel nhất; nếu hòa thì giữ file lớn hơn |
+| `best-quality` | Ưu tiên độ nét, độ sáng cân bằng, độ phân giải rồi kích thước file |
+| `largest` | Kích thước file lớn nhất |
+| `smallest` | Kích thước file nhỏ nhất |
+| `newest` | Sửa đổi gần đây nhất |
+| `oldest` | Sửa đổi lâu nhất |
+| `lexi` | Đường dẫn đứng đầu theo thứ tự từ điển |
 
-Review-only rule (reported but never auto-deleted):
+Chính sách này chỉ quyết định file nào nằm trong `keep`; nó không thay đổi cách nhận diện ảnh trùng.
+
+</details>
+
+<details>
+<summary><strong>Siết chặt cách gom nhóm ảnh trùng</strong></summary>
+
+Mặc định, công cụ dùng nhóm liên thông:
 
 ```text
---cosine-review (0.85) ≤ cosine < --cosine-verify (0.90)
-  => report only, not auto delete
+A trùng B, B trùng C  →  A, B, C cùng một nhóm
 ```
 
-Review-only pairs are written to the JSON report under `review_only` and are never passed to deletion.
-
-## Duplicate grouping
-
-By default, duplicate pairs are grouped as connected components:
-
-```text
-A matches B, and B matches C => A, B, C are one duplicate group
-```
-
-For stricter grouping, use agglomerative splitting after pair matching:
+Với bộ ảnh lớn hoặc có nhiều ảnh gần giống nhau, chuỗi liên kết này có thể tạo nhóm quá rộng. Dùng gom nhóm `agglomerative` để tách chặt hơn:
 
 ```bash
 uv run python main.py ./photos \
@@ -48,62 +133,93 @@ uv run python main.py ./photos \
   --agglomerative-cosine-threshold 0.97
 ```
 
-`complete` linkage is safest because all images in a cluster must stay within the threshold. `average` linkage is less strict and may keep larger groups.
+- `complete` (khuyến nghị): chặt hơn, mọi ảnh trong cụm phải duy trì ngưỡng đã chọn;
+- `average`: ít chặt hơn, thường giữ được cụm lớn hơn.
 
-## Install
+Nếu không đặt `--agglomerative-cosine-threshold`, công cụ dùng giá trị của `--cosine-auto`.
 
-This project uses `uv`.
+</details>
 
-```bash
-uv sync
-```
+<details>
+<summary><strong>Chuyển ảnh trùng vào thùng rác</strong></summary>
 
-If dependencies are already installed, you can run directly with:
-
-```bash
-uv run python main.py --help
-```
-
-## Basic usage
-
-Dry run scan:
+Sau khi kiểm tra báo cáo, chạy lại với `--inplace`:
 
 ```bash
-uv run python main.py ./photos
+uv run python main.py ./photos --inplace
 ```
 
-Dry run scan across multiple folders:
-
-```bash
-uv run python main.py ./photos1 ./photos2
-```
-
-This will:
-
-1. scan image files
-2. compute `sha256` and pHash
-3. extract image embeddings using a vision transformer model
-4. search candidates with FAISS
-5. apply duplicate rules
-6. write a JSON report
-
-Default report path:
+Ảnh trùng được chuyển tới:
 
 ```text
-./photos/dedup_report.json
+./photos/.imgdedup/trash/<run_id>/
 ```
 
-When scanning multiple folders, the default report path is:
+Cấu trúc thư mục tương đối của ảnh được giữ nguyên. Manifest phục vụ khôi phục được ghi tại:
 
 ```text
-./dedup_report.json
+./photos/.imgdedup/trash/<run_id>/restore_manifest.json
 ```
 
-No files are deleted in dry-run mode.
+`--inplace` không xóa vĩnh viễn nếu không có `--hard-delete`.
 
-## Select a representative subset
+</details>
 
-Use `select` to deduplicate a folder, choose exactly `M` diverse images from the remaining representatives, and export them without changing the source:
+<details>
+<summary><strong>Xóa vĩnh viễn ảnh trùng</strong></summary>
+
+> ⚠️ Chỉ thực hiện sau khi đã kiểm tra báo cáo. Chế độ này không có manifest khôi phục.
+
+```bash
+uv run python main.py ./photos --inplace --hard-delete --yes
+```
+
+Cần đủ cả ba cờ:
+
+- `--inplace`: cho phép thay đổi file nguồn;
+- `--hard-delete`: chọn xóa vĩnh viễn thay vì chuyển vào thùng rác;
+- `--yes`: xác nhận thao tác phá hủy.
+
+`--hard-delete` thiếu `--yes` sẽ bị từ chối. Nếu thiếu `--inplace`, lệnh vẫn là dry run và không xóa file.
+
+</details>
+
+<details>
+<summary><strong>Tìm và loại ảnh giống một ảnh mẫu</strong></summary>
+
+Dùng `remove-like` để so sánh từng ảnh trong thư mục với một ảnh tham chiếu:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg
+```
+
+Ảnh tham chiếu luôn được giữ. Báo cáo mặc định nằm tại:
+
+```text
+./photos/remove_like_report.json
+```
+
+Chuyển các ảnh khớp vào thùng rác:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg --inplace
+```
+
+Xóa vĩnh viễn các ảnh khớp:
+
+```bash
+uv run python main.py remove-like ./photos ./reference.jpg \
+  --inplace --hard-delete --yes
+```
+
+`remove-like` dùng cùng ngưỡng nhận diện với lệnh quét thông thường, nhưng không dùng gom nhóm, `--keep-policy`, `--k`, `--cross-folder-only` hoặc FAISS index đã lưu.
+
+</details>
+
+<details>
+<summary><strong>Chọn chính xác M ảnh đại diện để tạo dataset</strong></summary>
+
+Lệnh `select` loại ảnh trùng, chọn đúng số ảnh yêu cầu rồi xuất sang thư mục mới mà không sửa dữ liệu nguồn:
 
 ```bash
 uv run python main.py select ./photos \
@@ -113,11 +229,30 @@ uv run python main.py select ./photos \
   --make-preview
 ```
 
-Selection methods are `kmeans` (typical examples), `farthest` (maximum coverage), and `hybrid` (centroid candidates followed by coverage selection). Runs are reproducible with `--seed`.
+Các phương pháp chọn:
 
-The output contains the mirrored image tree under `images/`, JSON/CSV/text reports under `reports/`, and an optional contact sheet under `previews/`. Existing output directories are rejected unless `--force` is supplied. Export mode defaults to `copy` and can be changed with `--copy-mode hardlink` or `--copy-mode symlink`.
+| Phương pháp | Phù hợp khi |
+| --- | --- |
+| `hybrid` | Cần cân bằng giữa ảnh điển hình và độ đa dạng; đây là mặc định |
+| `kmeans` | Muốn các ví dụ điển hình gần tâm cụm |
+| `farthest` | Muốn độ phủ và sự khác biệt lớn nhất |
 
-Quality metrics are always used by the default `best-quality` duplicate representative policy. Quality-based rejection is opt-in:
+Kết quả có cấu trúc:
+
+```text
+selected-dataset/
+├── images/       # ảnh đã chọn, giữ cấu trúc đường dẫn tương đối
+├── reports/      # JSON, CSV, danh sách đường dẫn và thống kê
+└── previews/     # contact sheet nếu dùng --make-preview
+```
+
+Mặc định ảnh được copy. Có thể dùng `--copy-mode hardlink` hoặc `--copy-mode symlink`. Thư mục output phải nằm ngoài cây thư mục input và không được tồn tại; dùng `--force` để thay thế an toàn một output directory đã có.
+
+Kết quả có thể tái lập với cùng dữ liệu và `--seed` (mặc định `42`). Nếu sau khi lọc không còn đủ `M` ảnh hợp lệ, lệnh dừng với lỗi thay vì xuất ít ảnh hơn.
+
+### Lọc ảnh chất lượng thấp trước khi chọn
+
+Việc đo chất lượng luôn được dùng bởi `--keep-policy best-quality`, nhưng **loại bỏ** ảnh chất lượng thấp chỉ được bật khi có `--reject-low-quality`:
 
 ```bash
 uv run python main.py select ./photos \
@@ -131,94 +266,51 @@ uv run python main.py select ./photos \
   --max-brightness 240
 ```
 
-The blur score is edge variance computed with Pillow, so thresholds from OpenCV-based tools are not directly interchangeable. If fewer than `M` valid unique images remain, selection fails rather than silently exporting fewer images.
+Blur score là phương sai cạnh tính bằng Pillow, vì vậy không nên dùng trực tiếp ngưỡng lấy từ công cụ dựa trên OpenCV.
 
-## Remove images matching one input image
+</details>
 
-Use `remove-like` when you have one reference image and want to remove matching images from a folder. The reference image is kept; only matching images inside the scanned folder are reported or removed.
+<details>
+<summary><strong>Tinh chỉnh tốc độ và tài nguyên</strong></summary>
 
-Dry run:
-
-```bash
-uv run python main.py remove-like ./photos ./reference.jpg
-```
-
-This uses the same duplicate rules as the normal de-dup scan, but compares each folder image only against `./reference.jpg`.
-
-Default report path:
-
-```text
-./photos/remove_like_report.json
-```
-
-Move matching folder images to trash:
+Ví dụ:
 
 ```bash
-uv run python main.py remove-like ./photos ./reference.jpg --inplace
+uv run python main.py ./photos \
+  --batch-size 128 \
+  --metadata-workers 8 \
+  --loader-workers 0 \
+  --gpus 1 \
+  --gpu-memory-fraction 0.9 \
+  --k 50
 ```
 
-Hard delete matching folder images after reviewing the report:
+- Giảm `--batch-size` nếu GPU hết bộ nhớ.
+- `--metadata-workers` điều khiển số worker tính SHA-256 và pHash.
+- Giữ `--loader-workers 0` nếu chưa cần tối ưu; tăng thận trọng khi GPU phải chờ giải mã ảnh.
+- Nếu không đặt `--gpus`, công cụ dùng tất cả GPU khả dụng và tự fallback về một GPU hoặc CPU.
+- Tăng `--k` nếu mỗi ảnh có thể có rất nhiều bản gần trùng; giá trị lớn hơn làm tăng thời gian matching và kích thước báo cáo.
+- `--save-faiss-index` lưu `.imgdedup/faiss.index`; mặc định tắt để tránh chi phí ghi file.
 
-```bash
-uv run python main.py remove-like ./photos ./reference.jpg --inplace --hard-delete --yes
-```
+</details>
 
-No files are deleted in dry-run mode.
+## Công cụ quyết định ảnh trùng như thế nào?
 
-## Write report to custom path
+<details>
+<summary><strong>Xem các quy tắc và ngưỡng mặc định</strong></summary>
 
-```bash
-uv run python main.py ./photos --report ./dedup_report.json
-```
+Một cặp ảnh được tự động coi là trùng nếu thỏa **ít nhất một** điều kiện:
 
-For `remove-like`:
+| Quy tắc | Điều kiện mặc định |
+| --- | --- |
+| Trùng tuyệt đối | SHA-256 giống nhau |
+| pHash gần nhau | Khoảng cách Hamming ≤ `4` |
+| Embedding rất giống | Cosine similarity ≥ `0.97` |
+| Embedding + pHash xác minh | Cosine ≥ `0.90` **và** khoảng cách pHash ≤ `8` |
 
-```bash
-uv run python main.py remove-like ./photos ./reference.jpg --report ./remove_like_report.json
-```
+Cặp có cosine trong khoảng `0.85 ≤ cosine < 0.90` chỉ được đưa vào `review_only`, không được chuyển hoặc xóa tự động.
 
-## Compare only across folders
-
-Use `--cross-folder-only` when images in the same folder should not be treated as duplicates.
-Only pairs from different immediate parent folders are compared.
-
-```bash
-uv run python main.py ./photos --cross-folder-only
-```
-
-## Move duplicates to trash
-
-```bash
-uv run python main.py ./photos --inplace
-```
-
-This moves duplicate files to:
-
-```text
-./photos/.imgdedup/trash/<run_id>/
-```
-
-When scanning multiple folders, each duplicate is moved to the `.imgdedup/trash/<run_id>/` directory under the scanned root that contains it.
-
-A restore manifest is written to:
-
-```text
-./photos/.imgdedup/trash/<run_id>/restore_manifest.json
-```
-
-## Hard delete
-
-Only use this after reviewing the report.
-
-```bash
-uv run python main.py ./photos --inplace --hard-delete --yes
-```
-
-Without `--yes`, hard delete is rejected.
-
-> **⚠️ Note**: `--inplace` is required. Running `--hard-delete --yes` without `--inplace` is a no-op dry run — the tool will print "DRY RUN" and exit without deleting anything.
-
-## Useful options
+Có thể thay đổi ngưỡng:
 
 ```bash
 uv run python main.py ./photos \
@@ -226,183 +318,119 @@ uv run python main.py ./photos \
   --cosine-verify 0.90 \
   --cosine-review 0.85 \
   --phash-auto-distance 4 \
-  --phash-verify-distance 8 \
-  --cross-folder-only \
-  --grouping connected \
-  --k 50 \
-  --metadata-workers 8 \
-  --loader-workers 0
+  --phash-verify-distance 8
 ```
 
-## Options
-
-| Option | Default | Meaning |
-| --- | ---: | --- |
-| `folders` | required | One or more root folders to scan recursively for images |
-| `--cosine-auto` | `0.97` | Auto duplicate if cosine is at least this value |
-| `--cosine-verify` | `0.90` | Duplicate if cosine is at least this value and pHash distance is low enough |
-| `--cosine-review` | `0.85` | Lower bound for report-only pairs |
-| `--phash-auto-distance` | `4` | Auto duplicate if pHash distance is at most this value |
-| `--phash-verify-distance` | `8` | Max pHash distance for cosine + pHash verified duplicates |
-| `--k` | `50` | Number of FAISS nearest neighbors to search |
-| `--save-faiss-index` | off | Save `.imgdedup/faiss.index` after matching; disabled by default for speed |
-| `--batch-size` | `128` | Embedding inference batch size |
-| `--metadata-workers` | `min(32, CPU count)` | Parallel workers for SHA-256 and pHash metadata computation |
-| `--loader-workers` | `0` | PyTorch DataLoader workers for image loading; increase cautiously if GPU waits on image decoding |
-| `--model` | `facebook/dinov3-vitb16-pretrain-lvd1689m` | Hugging Face model for embedding extraction |
-| `--gpus` | all available | Number of GPUs to use for parallel processing |
-| `--gpu-memory-fraction` | `0.9` | GPU memory fraction per device (0.1–1.0) |
-| `--keep-policy` | `highest-resolution` | Which file to keep in each duplicate group |
-| `--cross-folder-only` | off | Only compare images from different immediate parent folders |
-| `--grouping` | `connected` | Group duplicates by connected components or `agglomerative` splitting |
-| `--agglomerative-linkage` | `complete` | Linkage for agglomerative grouping: `complete` or `average` |
-| `--agglomerative-cosine-threshold` | `--cosine-auto` | Cosine threshold used when splitting groups with agglomerative clustering |
-| `--inplace` | off | Move duplicates to `.imgdedup/trash/` after building the report |
-| `--hard-delete` | off | Permanently delete duplicates instead of moving them to trash; requires `--yes` |
-| `--yes` | off | Confirm destructive hard-delete mode |
-| `--report` | `<folder>/dedup_report.json` or `./dedup_report.json` for multiple folders | Output path for the JSON report |
-| `--no-report` | off | Build the report summary but skip writing the JSON file |
-
-For `remove-like`, positional arguments are `folder` and `image` instead of `folders`. It supports the same threshold, model, GPU, report, `--inplace`, `--hard-delete`, and `--yes` options, but does not use duplicate grouping, keep policy, `--k`, cross-folder comparison, or FAISS index saving.
-
-## Recommended settings
-
-### Small datasets
-
-For small collections, keep the default connected grouping and review the report:
-
-```bash
-uv run python main.py ./photos \
-  --grouping connected \
-  --k 50
-```
-
-This is fast, simple, and preserves the most inclusive duplicate groups.
-
-### Large datasets
-
-For larger collections or datasets with many visually similar images, use stricter agglomerative splitting to reduce chained groups:
-
-```bash
-uv run python main.py ./photos \
-  --grouping agglomerative \
-  --agglomerative-linkage complete \
-  --agglomerative-cosine-threshold 0.97 \
-  --k 50
-```
-
-If this splits too aggressively, try `--agglomerative-linkage average`. Increase `--k` only when you expect many near-duplicates per image; larger `--k` increases matching and report size.
-
-### Keep policies
+Ba ngưỡng cosine phải thỏa:
 
 ```text
-lexi                — lexicographically smallest filename
-smallest            — smallest file size
-largest             — largest file size
-highest-resolution  — most pixels (width × height); tie-break by file size
-newest              — most recent modification time
-oldest              — oldest modification time
-best-quality         — sharpness, balanced brightness, resolution, then file size
+cosine-review ≤ cosine-verify ≤ cosine-auto
 ```
 
-Example:
+Ngưỡng chặt hơn thường giảm false positive nhưng có thể bỏ sót ảnh trùng. Nên kiểm tra báo cáo trên dữ liệu thực tế trước khi dùng `--inplace`.
 
-```bash
-uv run python main.py ./photos --keep-policy largest
-```
+</details>
 
-## Report format
+## Cache, định dạng ảnh và thư mục bị bỏ qua
 
-Normal de-dup reports use the format below. `remove-like` reports use the same `groups` and `review_only` shape, with the reference image as `keep`, but include `reference_image` instead of `keep_policy`.
+<details>
+<summary><strong>Xem chi tiết</strong></summary>
 
-Example report with one duplicate group:
-
-```json
-{
-  "generated_at": "2026-06-12 10:30:00",
-  "total_images": 100,
-  "duplicate_groups": 2,
-  "total_duplicates": 3,
-  "review_only_pairs": 1,
-  "keep_policy": "highest-resolution",
-  "groups": [
-    {
-      "keep": "/path/photo.jpg",
-      "duplicates": [
-        {
-          "path": "/path/photo-copy.jpg",
-          "reason": "same_sha256",
-          "cosine": null,
-          "phash_distance": 0,
-          "same_sha256": true,
-          "confidence": "exact"
-        }
-      ]
-    }
-  ],
-  "review_only": [
-    {
-      "a": "/path/a.jpg",
-      "b": "/path/b.jpg",
-      "cosine": 0.87,
-      "phash_distance": 12,
-      "same_sha256": false,
-      "decision": "review",
-      "reason": "0.85<=cosine<0.90",
-      "confidence": "review"
-    }
-  ]
-}
-```
-
-### Report fields
-
-| Field | Description |
-| --- | --- |
-| `generated_at` | Timestamp of report generation |
-| `total_images` | Number of images scanned |
-| `duplicate_groups` | Number of groups with duplicates |
-| `total_duplicates` | Individual duplicate files to remove |
-| `review_only_pairs` | Count of pairs needing manual review |
-| `keep_policy` | Policy used to pick the kept file |
-| `groups` | Array of duplicate groups, each with a `keep` file and `duplicates` |
-| `review_only` | Array of pairs flagged for review (never auto-deleted) |
-
-## Supported image types
-
-The scanner currently includes:
+Các định dạng được quét:
 
 ```text
 .jpg  .jpeg  .png  .bmp  .webp  .tif  .tiff
 ```
 
-It skips common internal folders such as:
+Các thư mục bị bỏ qua:
 
 ```text
 .git  .imgdedup  __pycache__  node_modules
 ```
 
-## Caching
+Cache nằm trong `.imgdedup/` cạnh thư mục được quét (hoặc trong thư mục hiện tại khi quét nhiều nguồn):
 
-Metadata and embeddings are cached inside a `.imgdedup/` directory next to the scanned folder. When scanning multiple folders, the shared cache is written to `./.imgdedup/`:
-
-| File | Purpose |
+| File/thư mục | Nội dung |
 | --- | --- |
-| `db.sqlite` | SQLite database storing file paths, hashes, dimensions, and embedding offsets |
-| `embeddings.npy` | Memory-mapped array of all computed embeddings |
-| `faiss.index` | Serialized FAISS index for nearest-neighbor search |
-| `trash/<run_id>/` | Moved duplicate files and `restore_manifest.json` |
+| `db.sqlite` | Đường dẫn, hash, kích thước ảnh và vị trí embedding |
+| `embeddings.npy` | Mảng embedding dùng lại giữa các lần chạy |
+| `faiss.index` | Chỉ được tạo khi dùng `--save-faiss-index` |
+| `trash/<run_id>/` | Ảnh đã chuyển và manifest khôi phục |
 
-On subsequent runs, only new or changed files are processed — cached results are reused. During a run, cache metadata is loaded into memory once to avoid repeated SQLite lookups.
+Chỉ file mới hoặc đã thay đổi cần xử lý lại.
 
-## Architecture notes
+</details>
 
-- **Default model**: `facebook/dinov3-vitb16-pretrain-lvd1689m` (vision-only transformer). Any Hugging Face vision embedding model can be used via `--model`.
-- **FAISS** is used for nearest-neighbor search (GPU-accelerated when available).
-- **pHash search** uses an in-memory BK-tree for exact Hamming-distance queries.
-- **Grouping** uses connected components by default, with optional agglomerative splitting for stricter clusters.
-- **Report generation** indexes duplicate pairs once, then writes JSON report output with separate build/write timings.
-- **Embeddings** are L2-normalized, so FAISS inner product equals cosine similarity.
-- **GPU support**: multi-GPU parallel extraction via `ThreadPoolExecutor`, with automatic fallback to single GPU or CPU.
-- **Flash Attention 2** is used when available, falling back to PyTorch SDPA or eager attention.
-- **`bfloat16`** is used on Ampere (compute capability ≥ 8.0) GPUs; `float16` on older GPUs; `float32` on CPU.
+## Tham chiếu nhanh các tùy chọn
+
+<details>
+<summary><strong>Lệnh quét ảnh trùng</strong></summary>
+
+```text
+uv run python main.py <folders...> [options]
+```
+
+| Tùy chọn | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `--keep-policy` | `highest-resolution` | Chọn file giữ lại trong mỗi nhóm |
+| `--grouping` | `connected` | `connected` hoặc `agglomerative` |
+| `--cross-folder-only` | tắt | Chỉ so sánh khác thư mục cha trực tiếp |
+| `--k` | `50` | Số láng giềng gần nhất FAISS |
+| `--batch-size` | `128` | Batch inference embedding |
+| `--metadata-workers` | `min(32, CPU)` | Worker tính metadata |
+| `--loader-workers` | `0` | Worker nạp ảnh của PyTorch |
+| `--model` | `facebook/dinov3-vitb16-pretrain-lvd1689m` | Model embedding Hugging Face |
+| `--gpus` | tất cả | Số GPU sử dụng |
+| `--gpu-memory-fraction` | `0.9` | Tỉ lệ bộ nhớ mỗi GPU, từ `0.1` đến `1.0` |
+| `--inplace` | tắt | Áp dụng báo cáo lên file nguồn |
+| `--hard-delete` | tắt | Xóa vĩnh viễn; cần `--yes` |
+| `--report` | tự động | Đường dẫn báo cáo JSON |
+| `--no-report` | tắt | Không ghi báo cáo JSON |
+
+Chạy `uv run python main.py --help` để xem danh sách đầy đủ và giá trị hiện tại.
+
+</details>
+
+<details>
+<summary><strong>Lệnh remove-like</strong></summary>
+
+```text
+uv run python main.py remove-like <folder> <image> [options]
+```
+
+Hỗ trợ các tùy chọn ngưỡng, model, GPU, batch/worker, report và chế độ xóa. Không hỗ trợ các tùy chọn chỉ dành cho gom nhóm ảnh trùng.
+
+```bash
+uv run python main.py remove-like --help
+```
+
+</details>
+
+<details>
+<summary><strong>Lệnh select</strong></summary>
+
+```text
+uv run python main.py select <folder> --output <directory> --num <M> [options]
+```
+
+Các tùy chọn riêng quan trọng gồm `--selection-method`, `--copy-mode`, `--seed`, `--force`, `--make-preview` và nhóm tùy chọn lọc chất lượng.
+
+```bash
+uv run python main.py select --help
+```
+
+</details>
+
+## Ghi chú kỹ thuật
+
+<details>
+<summary><strong>Kiến trúc xử lý</strong></summary>
+
+- SHA-256 phát hiện file giống hệt nhau.
+- pHash và BK-tree phát hiện ảnh gần giống theo khoảng cách Hamming.
+- Model mặc định `facebook/dinov3-vitb16-pretrain-lvd1689m` tạo embedding hình ảnh.
+- Embedding được chuẩn hóa L2; inner product trong FAISS tương đương cosine similarity.
+- FAISS tìm các ứng viên gần nhất trên GPU khi khả dụng, nếu không sẽ dùng CPU.
+- Trích xuất embedding hỗ trợ nhiều GPU; Flash Attention 2 được dùng khi có và fallback về SDPA/eager attention.
+
+</details>
