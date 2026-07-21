@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,32 @@ no_report: false
         self.assertEqual(["./from-config"], args.folders)
         self.assertEqual(32, args.batch_size)
         self.assertFalse(args.no_report)
+
+    def test_yolo_dedup_can_run_with_only_config(self):
+        path = self._config(
+            """
+command: yolo-dedup
+dataset: ~/dataset
+output: ~/dataset-deduped
+copy_mode: hardlink
+split_priority: test,val,train
+cosine_auto: 0.98
+batch_size: 64
+grouping: agglomerative
+agglomerative_linkage: average
+"""
+        )
+
+        args = parse_args(["--config", path])
+
+        self.assertTrue(args.yolo_dedup)
+        self.assertEqual(os.path.expanduser("~/dataset"), args.dataset)
+        self.assertEqual(os.path.expanduser("~/dataset-deduped"), args.output)
+        self.assertEqual("hardlink", args.copy_mode)
+        self.assertEqual(0.98, args.cosine_auto)
+        self.assertEqual(64, args.batch_size)
+        self.assertEqual("agglomerative", args.grouping)
+        self.assertEqual("average", args.agglomerative_linkage)
 
     def test_select_required_values_can_come_from_config(self):
         path = self._config(

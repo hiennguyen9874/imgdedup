@@ -28,6 +28,13 @@ from .quality import QualityThresholds, measure_records
 from .selection import select_representatives
 from .selection_reporting import build_selection_report, write_selection_reports
 from .config import ConfigError, apply_config, cli_command, load_config
+from .yolo import (
+    build_cleanup_plan,
+    export_yolo_dataset,
+    flatten_samples,
+    load_yolo_dataset,
+    parse_split_priority,
+)
 
 
 def parse_args(argv=None):
@@ -44,6 +51,52 @@ def parse_args(argv=None):
         raise SystemExit(
             f"Error: config command '{command}' conflicts with CLI command '{explicit_command}'"
         )
+
+    if command == "yolo-dedup":
+        parser = argparse.ArgumentParser(
+            description="Export a YOLO dataset with duplicate images removed using the dedup matcher",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument("command", choices=["yolo-dedup"], nargs="?" if config else None)
+        parser.add_argument("dataset", nargs="?" if config else None, help="YOLO dataset root containing data.yaml")
+        parser.add_argument("--config", help="YAML config file; its values override CLI options")
+        parser.add_argument("--output", required=not bool(config), help="New output dataset directory")
+        parser.add_argument("--copy-mode", choices=["copy", "hardlink", "symlink"], default="copy")
+        parser.add_argument("--force", action="store_true", help="Replace an existing output directory")
+        parser.add_argument(
+            "--split-priority",
+            default="test,val,train",
+            help="Highest-to-lowest retained split order. Default: test,val,train",
+        )
+        parser.add_argument("--cosine-auto", type=float, default=0.97)
+        parser.add_argument("--cosine-verify", type=float, default=0.90)
+        parser.add_argument("--cosine-review", type=float, default=0.85)
+        parser.add_argument("--phash-auto-distance", type=int, default=4)
+        parser.add_argument("--phash-verify-distance", type=int, default=8)
+        parser.add_argument("--k", type=int, default=50)
+        parser.add_argument("--save-faiss-index", action="store_true")
+        parser.add_argument("--batch-size", type=int, default=128)
+        parser.add_argument("--metadata-workers", type=int, default=min(32, (os.cpu_count() or 1)))
+        parser.add_argument("--loader-workers", type=int, default=0)
+        parser.add_argument("--model", default="facebook/dinov3-vitb16-pretrain-lvd1689m")
+        parser.add_argument("--gpus", type=int, default=None)
+        parser.add_argument("--gpu-memory-fraction", type=float, default=0.9)
+        parser.add_argument(
+            "--keep-policy",
+            choices=["lexi", "smallest", "largest", "highest-resolution", "newest", "oldest", "best-quality"],
+            default="highest-resolution",
+        )
+        parser.add_argument("--cross-folder-only", action="store_true")
+        parser.add_argument("--grouping", choices=["connected", "agglomerative"], default="connected")
+        parser.add_argument("--agglomerative-linkage", choices=["complete", "average"], default="complete")
+        parser.add_argument("--agglomerative-cosine-threshold", type=float, default=None)
+        args = apply_config(parser, parser.parse_args(argv), config, "yolo-dedup")
+        if args.dataset is not None:
+            args.dataset = os.path.expanduser(args.dataset)
+        if args.output is not None:
+            args.output = os.path.expanduser(args.output)
+        args.yolo_dedup = True
+        return args
 
     if command == "select":
         parser = argparse.ArgumentParser(
@@ -302,6 +355,21 @@ def parse_args(argv=None):
 
 def validate_args(args):
     """Validate merged command line and config arguments."""
+    if getattr(args, "yolo_dedup", False):
+        if args.dataset is None or not os.path.isdir(args.dataset):
+            print(f"Error: {args.dataset} is not a valid YOLO dataset directory")
+            sys.exit(1)
+        if args.output is None:
+            print("Error: yolo-dedup requires --output")
+            sys.exit(1)
+        try:
+            parse_split_priority(args.split_priority)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
+        _validate_matching_options(args)
+        return
+
     if not args.folders or any(folder is None for folder in args.folders):
         print("Error: at least one input folder is required")
         sys.exit(1)
@@ -337,35 +405,10 @@ def validate_args(args):
             print("Error: preview columns must be positive and preview size at least 32")
             sys.exit(1)
 
-    # Validate GPU memory fraction
-    if not 0.1 <= args.gpu_memory_fraction <= 1.0:
-        print(
-            f"Error: --gpu-memory-fraction must be between 0.1 and 1.0, got {args.gpu_memory_fraction}"
-        )
-        sys.exit(1)
-
-    if args.cosine_review > args.cosine_verify or args.cosine_verify > args.cosine_auto:
-        print("Error: cosine thresholds must satisfy review <= verify <= auto")
-        sys.exit(1)
-
-    if args.metadata_workers < 1:
-        print("Error: --metadata-workers must be at least 1")
-        sys.exit(1)
-
-    if args.loader_workers < 0:
-        print("Error: --loader-workers must be 0 or greater")
-        sys.exit(1)
+    _validate_matching_options(args)
 
     if args.hard_delete and not args.yes:
         print("Error: --hard-delete requires --yes")
-        sys.exit(1)
-
-    if (
-        hasattr(args, "agglomerative_cosine_threshold")
-        and args.agglomerative_cosine_threshold is not None
-        and not -1.0 <= args.agglomerative_cosine_threshold <= 1.0
-    ):
-        print("Error: --agglomerative-cosine-threshold must be between -1.0 and 1.0")
         sys.exit(1)
 
     if args.no_report and args.report is not None:
@@ -379,6 +422,30 @@ def validate_args(args):
         args.report = os.path.join(report_root, report_name)
 
     args.cache_root = args.folders[0] if len(args.folders) == 1 else os.getcwd()
+
+
+def _validate_matching_options(args):
+    if not 0.1 <= args.gpu_memory_fraction <= 1.0:
+        print(
+            f"Error: --gpu-memory-fraction must be between 0.1 and 1.0, got {args.gpu_memory_fraction}"
+        )
+        sys.exit(1)
+    if args.cosine_review > args.cosine_verify or args.cosine_verify > args.cosine_auto:
+        print("Error: cosine thresholds must satisfy review <= verify <= auto")
+        sys.exit(1)
+    if args.metadata_workers < 1:
+        print("Error: --metadata-workers must be at least 1")
+        sys.exit(1)
+    if args.loader_workers < 0:
+        print("Error: --loader-workers must be 0 or greater")
+        sys.exit(1)
+    agglomerative_threshold = getattr(args, "agglomerative_cosine_threshold", None)
+    if (
+        agglomerative_threshold is not None
+        and not -1.0 <= agglomerative_threshold <= 1.0
+    ):
+        print("Error: --agglomerative-cosine-threshold must be between -1.0 and 1.0")
+        sys.exit(1)
 
 
 def print_config(args):
@@ -834,10 +901,106 @@ def run_select(args):
         cache.close()
 
 
+def run_yolo_dedup(args):
+    """Deduplicate manifest-declared YOLO images and export a new dataset."""
+    try:
+        priority = parse_split_priority(args.split_priority)
+        data, samples_by_split = load_yolo_dataset(args.dataset)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+    samples = flatten_samples(samples_by_split)
+    records = [_file_record(str(sample.image_path)) for sample in samples]
+    if not records:
+        print("No images declared in YOLO manifests. Exiting.")
+        sys.exit(0)
+
+    print(f"Found {len(records)} images declared in YOLO manifests")
+    print_gpu_info()
+    cache = DedupCache(args.dataset)
+    try:
+        features, valid_indices = _prepare_records(records, args, cache)
+        thresholds = MatchThresholds(
+            cosine_auto=args.cosine_auto,
+            cosine_verify=args.cosine_verify,
+            cosine_review=args.cosine_review,
+            phash_auto_distance=args.phash_auto_distance,
+            phash_verify_distance=args.phash_verify_distance,
+        )
+        duplicate_pairs, review_pairs, duplicate_groups = find_duplicate_pairs(
+            records,
+            features,
+            valid_indices,
+            thresholds=thresholds,
+            k=args.k,
+            faiss_index_path=str(cache.faiss_index_path) if args.save_faiss_index else None,
+            show_progress=True,
+            cross_folder_only=args.cross_folder_only,
+            grouping_method=args.grouping,
+            agglomerative_linkage=args.agglomerative_linkage,
+            agglomerative_cosine_threshold=args.agglomerative_cosine_threshold,
+        )
+        quality_metrics = measure_records(records) if args.keep_policy == "best-quality" else None
+        retained, groups = build_cleanup_plan(
+            samples,
+            records,
+            duplicate_groups,
+            priority,
+            args.keep_policy,
+            quality_metrics,
+        )
+        matching_report = {
+            "duplicate_pairs": len(duplicate_pairs),
+            "review_only_pairs": len(review_pairs),
+            "review_only": [
+                {
+                    "a": str(samples[pair.a].relative_image_path),
+                    "b": str(samples[pair.b].relative_image_path),
+                    "cosine": pair.cosine,
+                    "phash_distance": pair.phash_distance,
+                    "same_sha256": pair.same_sha256,
+                    "reason": pair.reason,
+                    "confidence": pair.confidence,
+                }
+                for pair in review_pairs
+            ],
+        }
+        with staged_output(args.dataset, args.output, args.force) as output_root:
+            report = export_yolo_dataset(
+                args.dataset,
+                output_root,
+                data,
+                retained,
+                groups,
+                args.copy_mode,
+                priority,
+                matching_report,
+                Path(args.output).expanduser().absolute(),
+            )
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    finally:
+        cache.close()
+
+    print(f"Exported YOLO dataset: {args.output}")
+    print(f"Input images: {report['total_input_images']}")
+    print(f"Duplicate groups: {report['duplicate_groups']}")
+    print(f"Images removed: {report['total_duplicates']}")
+    print(f"Review-only pairs: {report['review_only_pairs']}")
+    print(f"Annotation conflicts: {report['annotation_conflicts']}")
+    print(f"Report: {Path(args.output) / 'reports' / 'yolo_dedup_report.json'}")
+
+
 def main():
     """Main entry point for the CLI"""
     args = parse_args()
     validate_args(args)
+
+    if getattr(args, "yolo_dedup", False):
+        run_yolo_dedup(args)
+        return
 
     if getattr(args, "select", False):
         run_select(args)

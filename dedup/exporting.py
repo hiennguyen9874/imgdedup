@@ -77,7 +77,7 @@ def staged_output(
             shutil.rmtree(staging)
 
 
-def _transfer(source: Path, destination: Path, mode: str) -> None:
+def transfer_file(source: Path, destination: Path, mode: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if mode == "copy":
         shutil.copy2(source, destination)
@@ -104,7 +104,7 @@ def export_records(
             raise ValueError(f"image is outside input root: {source}") from exc
         destination = output / "images" / relative
         try:
-            _transfer(source, destination, mode)
+            transfer_file(source, destination, mode)
             results.append(
                 {"source": str(source), "output": str(destination), "status": "exported"}
             )

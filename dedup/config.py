@@ -10,7 +10,7 @@ from typing import Any, Sequence
 import yaml
 
 
-COMMANDS = {"dedup", "remove-like", "select"}
+COMMANDS = {"dedup", "remove-like", "select", "yolo-dedup"}
 
 
 class _Yaml12SafeLoader(yaml.SafeLoader):
@@ -69,7 +69,7 @@ def load_config(argv: Sequence[str]) -> tuple[str | None, dict[str, Any]]:
 def cli_command(argv: Sequence[str]) -> str:
     """Return the workflow explicitly selected by the CLI, if any."""
     for value in argv:
-        if value in {"remove-like", "select"}:
+        if value in {"remove-like", "select", "yolo-dedup"}:
             return value
     return "dedup"
 
