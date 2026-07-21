@@ -15,8 +15,8 @@
 # Lệnh luôn export dataset mới; không hỗ trợ inplace hoặc hard_delete.
 
 command: yolo-dedup
-dataset: /home/jovyan/workspace/evnhcmc-workspace/data/workspace/datasets/annotated/EVNNhom5-Annotated-New
-output: /home/jovyan/workspace/evnhcmc-workspace/data/workspace/datasets/annotated/EVNNhom5-Annotated-New-Deduped
+dataset: /home/jovyan/workspace/evnhcmc-workspace/data/workspace/datasets/annotated/EVNNhom2-Annotated-New
+output: /home/jovyan/workspace/evnhcmc-workspace/data/workspace/datasets/annotated/EVNNhom2-Annotated-New-Deduped
 copy_mode: copy              # copy | hardlink | symlink
 force: false
 split_priority: test,val,train # Split giữ lại từ cao đến thấp.
